@@ -36,6 +36,23 @@ Goal: calm, clean, PROFESSIONAL - like a good documentary or an image film, not 
      Both models download once automatically. Cost: ~25 s per second of footage on a laptop CPU (depth every 3rd frame) - tell the
      user it takes a few minutes. LOOK at a frame first (`look`) to find the edge, then check rendered frames.
      After moving/retiming the text or changing the shots under it, run `op behind` again (cut-outs are cached in media/).
+   - **big 3D text that stays in the scene** (After Effects "3D camera tracker" look - THE showpiece for school/drone videos,
+     use it when the user wants a title "behind the school", "standing in the scene", "3D", "like After Effects"):
+     `python clipcut.py op worldtext #N "LESSING GYMNASIUM" y=0.37 w=0.95` -> worldtext.py bakes the shot: huge milky,
+     slightly transparent frosted-glass letters with a 3D extrusion (upwards: seen from above you see their top faces), a light
+     glass rim and a soft contact shadow, pinned to the scene behind the letters (feature tracking + smoothed camera path), so
+     when the drone/camera moves the text stays where it is, grows and shifts like a real sign; building, people and trees in
+     front cover it (depth). Works best with a moving camera (drone, gimbal, handheld push-in); on a static shot it just stands.
+     Placement (fractions of the shot's FIRST frame): `y` = bottom of the letters - put it just behind the building's back edge
+     so the building/roof cuts or touches the foot of the letters, never over the people/action the video is about;
+     `w` = width (0.8-0.95 = big); `x` = centre. Options: `opacity` 0.8, `depth` 0.22 (extrusion), `style` frost|solid,
+     `font` montserrat|playfair|impact. Recipe: `look` the shot, pick y from the first frame (where is the back edge of the
+     building, where are the people), run it (~30 s per second of footage), then LOOK at 4 frames spread over the shot
+     (`ffmpeg -i media/out.mp4 -vf "select='eq(n,0)+eq(n,80)+eq(n,160)+eq(n,230)',scale=800:-2,tile=2x2" -frames:v 1 -fps_mode passthrough tmp/s.png`):
+     the text must not cover faces/people and must read clearly. Re-run with new values any time (it re-bakes from the original
+     footage, kept in segment.world.src); `op worldtext #N none` = remove. Cut the shot to its final length BEFORE (the bake
+     covers the shot's in..out). Checked 2026-11-25: Lessing drone push-in (tracker vs SIFT 2-6 px per 40 frames where one
+     layer is behind the letters), Brandenburger Tor handheld with sky (falls back to the whole background).
    - music: audio item with `fadeIn` 1, `fadeOut` 2, volume ~0.6 under speech (speech clips keep `volume` 1).
    - interviews / speech: `python clipcut.py` auto captions via the Text tab (faster-whisper) or `/api/transcribe`; set captions to
      `montserrat`, size 0.045, `box: true` or `shadow: true`.
@@ -70,7 +87,9 @@ python clipcut.py op say "Ich schneide jetzt auf den Beat"     banner only
 python clipcut.py op split 3.2                                 split the main track at timeline second 3.2
 python clipcut.py op set #4 zoom=1 zoomTo=1.08 filter=kino     SEL = #index on main track or any item id; values are JSON
 python clipcut.py op text "EUROPA" 3.0 2.0                     text at 3.0 s for 2 s (then `op set <id> font="montserrat" opacity=0.85 ...`)
-python clipcut.py op behind <textid>                           put that text behind the person (RVM cut-outs on top)
+python clipcut.py op behind <textid> [building]                put that text behind the person / building (cut-outs on top)
+python clipcut.py op worldtext #N "TEXT" y=0.37 w=0.95         big 3D frosted text pinned in the scene behind a building (bakes the shot)
+python clipcut.py op worldtext #N none                         remove it again (back to the original footage)
 python clipcut.py op transition #3 dissolve 0.6                transition after clip #3
 python clipcut.py op move #6 1 | op delete #2
 python clipcut.py beats media/SONG.mp3                         {bpm, beats, strong (accents), drop (s)}
@@ -97,7 +116,8 @@ segment = {id, media, in, out, speed, reverse, freeze, dur, rotation, flip, volu
            keyframes: [{t, scale, x, y, rotation, opacity}], speedCurve: [{t, speed}],
            adjust: {bri, con, sat, temp, sharp, vig, grain} each -1..1, effect: glitch|rgbsplit|pixelate|blur|mirror|strobe|invert,
            crop: {x, y, w, h}, stab: true (stabilise shaky phone footage), denoise: true, pitch: -12..12,
-           eyes: true (glowing eyes effect), slide: bottom|left|right|top (cut-out of the person slides in over the previous shot)}
+           eyes: true (glowing eyes effect), slide: bottom|left|right|top (cut-out of the person slides in over the previous shot),
+           world: {text, x, y, w, opacity, depth, style, font, src: {media, in, out}} (set by `op worldtext`; media = the baked clip)}
            transition goes INTO the next clip and overlaps it (timeline shrinks by dur). freeze=true: still frame `in` for `dur` s.
            transition types: none fade dissolve fadeblack fadewhite wipeleft/right/up/down slideleft/... smoothleft/right
            circleopen/close radial zoomin pixelize hblur distance squeezeh diagtl hlslice
@@ -133,4 +153,4 @@ macOS: double-click `start.command` (installs into `.venv` on the first run; nee
 Windows: `pip install -r requirements.txt`, ffmpeg on PATH, `start.bat`. Or `python server.py` -> editor on http://127.0.0.1:8777.
 On the Mac use `.venv/bin/python clipcut.py ...` (or activate the venv) so the installed packages are found.
 Checks: `python clipcut.py selftest` (logic), `python clipcut.py rendertest` (2 s render through every feature),
-`python copy_edit.py`, `python trends.py`, `python transitions.py`.
+`python copy_edit.py`, `python trends.py`, `python transitions.py`, `python worldtext.py selftest`.

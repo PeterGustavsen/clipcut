@@ -11,7 +11,7 @@
   tiktok  SONG CLIP... [--style auto|ironic|phonk|velocity|aura|montage|trending] [--text "WORDS"] [--hook S] [--pace 0.4] [--dumb]
                                                    full automatic "edit" -> project.json, step by step (watchable in the editor)
   trends  refresh [--query "phonk edit"] [--n 10] | show   fingerprint popular TikTok edits (media/_trends/) -> style "trending"
-  op      say MSG | split T | set SEL k=v.. | text "T" START DUR | delete SEL | move SEL IDX | transition IDX TYPE DUR | eyes SEL | behind TEXTID [building]
+  op      say MSG | split T | set SEL k=v.. | text "T" START DUR | delete SEL | move SEL IDX | transition IDX TYPE DUR | eyes SEL | behind TEXTID [building] | worldtext SEL "TEXT" [x= y= w= opacity= depth= style=frost|solid font=] | worldtext SEL none
                                                    one visible edit on project.json (SEL = #index or id); the editor shows it live
   faces   CLIP...                                  build/refresh the star reference from these clips (-> face_ref.json + _star_faces.png)
   check   CLIP                                     where the star is on screen: ranges + contact sheet with green/red frames
@@ -1022,6 +1022,24 @@ def op(args, root=ROOT):
         import fxface
         k, i, x = find(rest[0]); x[cmd] = True
         msg = fxface.bake(P, Path(root) / "media", root) or f"No face found for {cmd} on {rest[0]}"
+    elif cmd == "worldtext":  # big 3D frosted text pinned in the scene behind a building (worldtext.py), baked into the shot
+        import worldtext
+        k, i, x = find(rest[0])
+        if k != "video":
+            raise SystemExit("worldtext needs a main-track shot (#index or id)")
+        if rest[1:2] == ["none"]:
+            worldtext.remove(x)
+            msg = f"3D-Text von Shot {rest[0]} entfernt"
+        else:
+            spec = {"text": rest[1]} if len(rest) > 1 and "=" not in rest[1] else {}
+            for kv in rest[1 + bool(spec):]:
+                key, val = kv.split("=", 1)
+                try:
+                    spec[key] = json.loads(val)
+                except ValueError:
+                    spec[key] = val
+            out = worldtext.apply(x, Path(root) / "media", spec, log=lambda m: print(m, file=sys.stderr))
+            msg = f"3D-Text '{x['world']['text']}' steht jetzt in der Szene (Shot {rest[0]}, {Path(out).name})"
     elif cmd == "behind":  # text behind the person: RVM cut-out of the shots under the text goes on top of it
         import fxface
         k, i, x = find(rest[0])
@@ -1057,7 +1075,7 @@ def op(args, root=ROOT):
         msg = f"Set {' '.join(rest[1:])} on {rest[0]}"
     elif cmd == "text":
         P["text"].append({"id": uid(), "text": rest[0], "start": float(rest[1]), "dur": float(rest[2]), "x": 0.5, "y": 0.22, "size": 0.09,
-                          "color": "#ffffff", "font": "impact", "box": False})
+                          "color": "#ffffff", "font": "montserrat", "shadow": True, "box": False})
         msg = f"Text '{rest[0]}' at {float(rest[1]):.2f}s"
     elif cmd == "sticker":  # op sticker <textid> <WORD> <media.webm> [scale=1.1] [rot=-15] | op sticker <textid> none: emoji right after a caption word
         k, i, x = find(rest[0])
