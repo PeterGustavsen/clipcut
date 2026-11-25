@@ -108,7 +108,7 @@ class _Layer:
         return [self.g[i] for i in np.nonzero(m)[0]]
 
 
-def render(out, lat, lon, label="", sub="", dur=9.0, W=1920, H=1080, fps=30, country=None, log=print):
+def render(out, lat, lon, label="", sub="", dur=10.0, W=1920, H=1080, fps=30, country=None, log=print):
     import brand
     D = json.loads((ROOT / "data" / "europe.json").read_text(encoding="utf-8"))
     PL = fetch_place(lat, lon, log)
@@ -145,7 +145,8 @@ def render(out, lat, lon, label="", sub="", dur=9.0, W=1920, H=1080, fps=30, cou
     with tempfile.TemporaryDirectory() as tmp:
         for i in range(n):
             t = i / fps
-            z = ease((t - t_zoom0) / (t_zoom1 - t_zoom0))
+            uz = min(1.0, max(0.0, (t - t_zoom0) / (t_zoom1 - t_zoom0)))
+            z = ease(uz ** 0.8)  # a bit quicker over the continent, slower down in the streets
             width = math.exp(math.log(w0 * 0.92) + (math.log(w1) - math.log(w0 * 0.92)) * z) if t >= t_zoom0 else w0 * (1 - 0.08 * t / t_zoom0)
             # centre follows the zoom so the target drifts in smoothly (van Wijk-like: move with the log-zoom)
             m = (math.log(w0) - math.log(width)) / (math.log(w0) - math.log(w1))
@@ -173,7 +174,7 @@ def render(out, lat, lon, label="", sub="", dur=9.0, W=1920, H=1080, fps=30, cou
                 cv2.polylines(img, [np.int32(q * 16)], True, BORDER, max(1, round(1.2 * u)), cv2.LINE_AA, shift=4)
             rw = max(1, round(u * (1 + 2.5 * z)))
             ramp = lambda a, b: ease((math.log(a) - math.log(width)) / (math.log(a) - math.log(b)))  # 0 at width a -> 1 at width b
-            osm_w = ramp(90e3, 45e3) if len(water.g) else 0  # OSM river replaces the coarse map river when zooming in
+            osm_w = ramp(200e3, 50e3) if len(water.g) else 0  # OSM river replaces the coarse map river when zooming in
             view = (ctr[0] - W / 2 / scale, ctr[1] - H / 2 / scale, ctr[0] + W / 2 / scale, ctr[1] + H / 2 / scale)
 
             def layer(geoms, closed, col, width_px, alpha, fill=None):
@@ -191,13 +192,13 @@ def render(out, lat, lon, label="", sub="", dur=9.0, W=1920, H=1080, fps=30, cou
 
             if osm_w > 0:  # the Rhine at its real width (~350 m), at least a visible line
                 layer(water, False, RIVER, max(rw, 350 * scale), osm_w)
-            layer(roads[3], False, (0xe8, 0xdc, 0xcf), 2.2 * u + 18 * scale, 0.55 * ramp(160e3, 70e3))
-            layer(roads[2], False, (0xe0, 0xd2, 0xc2), 1.6 * u + 12 * scale, 0.45 * ramp(70e3, 30e3))
-            layer(roads[1], False, (0xd8, 0xc8, 0xb6), 1.2 * u + 9 * scale, 0.40 * ramp(30e3, 14e3))
-            layer(minor, False, (0xd0, 0xbc, 0xa6), 0.9 * u + 6 * scale, 0.35 * ramp(9e3, 4.5e3))
-            layer(blds, True, (0xc8, 0xa6, 0x80), 0.8 * u if scale > 0.3 else 0, 0.75 * ramp(12e3, 5e3), fill=(0xa6, 0x7c, 0x52))
+            layer(roads[3], False, (0xe8, 0xdc, 0xcf), 2.2 * u + 18 * scale, 0.55 * ramp(400e3, 80e3))
+            layer(roads[2], False, (0xe0, 0xd2, 0xc2), 1.6 * u + 12 * scale, 0.45 * ramp(150e3, 30e3))
+            layer(roads[1], False, (0xd8, 0xc8, 0xb6), 1.2 * u + 9 * scale, 0.40 * ramp(60e3, 12e3))
+            layer(minor, False, (0xd0, 0xbc, 0xa6), 0.9 * u + 6 * scale, 0.35 * ramp(20e3, 4e3))
+            layer(blds, True, (0xc8, 0xa6, 0x80), 0.8 * u if scale > 0.3 else 0, 0.75 * ramp(25e3, 4e3), fill=(0xa6, 0x7c, 0x52))
             for name, g in marks:  # landmarks (Kölner Dom): gold outline while the city is in view
-                layer([g], True, GOLD, 2 * u, ramp(120e3, 50e3), fill=(0x6f, 0xb4, 0xe6))
+                layer([g], True, GOLD, 2 * u, ramp(250e3, 50e3), fill=(0x6f, 0xb4, 0xe6))
             for xy in ([] if osm_w >= 1 else rivers):
                 q = P(xy)
                 if q[:, 0].max() < 0 or q[:, 0].min() > W or q[:, 1].max() < 0 or q[:, 1].min() > H:
@@ -224,10 +225,8 @@ def render(out, lat, lon, label="", sub="", dur=9.0, W=1920, H=1080, fps=30, cou
                 q = P(np.array([px_, py_]))
                 if not (0 < q[0] < W and 0 < q[1] < H):
                     continue
-                need = 1.2e6 if width > 1500e3 else 6e5 if width > 500e3 else 2.5e5
-                if pop < need:
-                    continue
-                a = int(200 * ease((t - t_zoom0) / (dur * 0.1)) * (1 - ramp(25e3, 10e3))) if width < 2500e3 else 0
+                wshow = min(3000e3, max(120e3, 3000e3 * (pop / 4e6) ** 0.6))  # width at which this city is fully shown
+                a = int(200 * ease(t / 1.2) * ramp(wshow * 3, wshow) * (1 - ramp(40e3, 10e3)))
                 if a <= 0:
                     continue
                 f_ = font("medium", 20 * u)
@@ -241,16 +240,17 @@ def render(out, lat, lon, label="", sub="", dur=9.0, W=1920, H=1080, fps=30, cou
                 d.text((q[0] + 8 * u, q[1] - 12 * u), name, font=f_, fill=(230, 236, 242, a))
             for name, g in marks:
                 q = P(g).mean(0)
-                a = int(230 * ramp(120e3, 50e3) * (1 - ramp(9e3, 5e3)))
+                a = int(230 * ramp(250e3, 50e3) * (1 - ramp(15e3, 5e3)))
                 if a > 0 and 0 < q[0] < W and 0 < q[1] < H:
                     d.text((q[0] + 12 * u, q[1] - 30 * u), name, font=font("bold", 22 * u), fill=(255, 214, 120, a))
             if PL and osm_w > 0:  # licence: OpenStreetMap data must be credited where it is shown
                 d.text((W - 16 * u, H - 14 * u), "Kartendaten © OpenStreetMap-Mitwirkende, Natural Earth", font=font("medium", 15 * u),
                        fill=(255, 255, 255, int(170 * osm_w)), anchor="rd")
             # ring of 12 stars over Europe at the start
-            sa = ease(t / 0.8) * (1 - ease((t - t_zoom0 * 0.8) / 0.7))
+            grow = (w0 / width) ** 0.42  # the ring opens up with the zoom: the camera flies through it
+            rr, s = 0.30 * H * (1 + 0.03 * t) * grow, 0.032 * H * grow ** 0.7
+            sa = ease(t / 0.8) * (1 - ease((rr - 0.5 * W) / (0.45 * W)))
             if sa > 0:
-                rr, s = 0.30 * H * (1 + 0.04 * t), 0.032 * H
                 for k in range(12):
                     ang = -np.pi / 2 + k * np.pi / 6 + t * 0.32  # slow, visible turn
                     star(d, W / 2 + rr * np.cos(ang), H / 2 + rr * np.sin(ang), s, (255, 204, 0, int(255 * sa)))
@@ -310,7 +310,7 @@ if __name__ == "__main__":
         selftest(); sys.exit()
     ap = argparse.ArgumentParser()
     ap.add_argument("out"); ap.add_argument("lat", type=float); ap.add_argument("lon", type=float); ap.add_argument("label", nargs="?", default="")
-    ap.add_argument("--sub", default=""); ap.add_argument("--dur", type=float, default=9.0)
+    ap.add_argument("--sub", default=""); ap.add_argument("--dur", type=float, default=10.0)
     ap.add_argument("--w", type=int, default=1920); ap.add_argument("--h", type=int, default=1080); ap.add_argument("--fps", type=int, default=30)
     o = ap.parse_args()
     print(render(o.out, o.lat, o.lon, o.label, o.sub, o.dur, o.w, o.h, o.fps))
