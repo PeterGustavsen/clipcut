@@ -14,3 +14,5 @@ build/
 .DS_Store
 face_ref.json
 _star_faces.png
+models/skyseg.onnx
+models/*.part

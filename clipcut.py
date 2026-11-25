@@ -11,7 +11,7 @@
   tiktok  SONG CLIP... [--style auto|ironic|phonk|velocity|aura|montage|trending] [--text "WORDS"] [--hook S] [--pace 0.4] [--dumb]
                                                    full automatic "edit" -> project.json, step by step (watchable in the editor)
   trends  refresh [--query "phonk edit"] [--n 10] | show   fingerprint popular TikTok edits (media/_trends/) -> style "trending"
-  op      say MSG | split T | set SEL k=v.. | text "T" START DUR | delete SEL | move SEL IDX | transition IDX TYPE DUR | eyes SEL | behind TEXTID
+  op      say MSG | split T | set SEL k=v.. | text "T" START DUR | delete SEL | move SEL IDX | transition IDX TYPE DUR | eyes SEL | behind TEXTID [building]
                                                    one visible edit on project.json (SEL = #index or id); the editor shows it live
   faces   CLIP...                                  build/refresh the star reference from these clips (-> face_ref.json + _star_faces.png)
   check   CLIP                                     where the star is on screen: ranges + contact sheet with green/red frames
@@ -1027,9 +1027,10 @@ def op(args, root=ROOT):
         k, i, x = find(rest[0])
         if k != "text":
             raise SystemExit("behind needs a text id")
-        x["behind"] = True
+        x["behind"] = "building" if rest[1:2] == ["building"] else True
         n = fxface.behind(P, x, Path(root) / "media")
-        msg = f"Text '{x['text'][:30]}' steht jetzt hinter der Person ({n} Ausschnitt(e))" if n else "Keine Person unter dem Text gefunden"
+        what = "dem Gebäude" if x["behind"] == "building" else "der Person"
+        msg = f"Text '{x['text'][:30]}' steht jetzt hinter {what} ({n} Ausschnitt(e))" if n else "Kein passender Shot unter dem Text gefunden"
     elif cmd == "split":
         t, starts = float(rest[0]), tl_layout(P)
         i = max((i for i, st in enumerate(starts) if st <= t), default=None)

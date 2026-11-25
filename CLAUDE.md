@@ -23,8 +23,12 @@ Goal: calm, clean, PROFESSIONAL - like a good documentary or an image film, not 
      (long words at size > 0.12 overflow a 9:16 canvas).
    - **text behind a person** (CapCut "text behind subject"): big title with `behind: true`, then
      `python clipcut.py op behind <textid>` -> RVM cuts out the person in every shot under the text and puts the cut-out on top.
-     Place the text so the person's head/shoulders overlap part of it (e.g. y 0.35-0.45). Works for people only, not buildings.
-     After moving/retiming the text or changing the shots under it, run `op behind` again.
+     Place the text so the person's head/shoulders overlap part of it (e.g. y 0.35-0.45).
+   - **text behind a building** (or tower, skyline, trees): `behind: "building"` / `python clipcut.py op behind <textid> building`
+     -> sky segmentation (models/skyseg.onnx, 176 MB, downloaded automatically on first use): everything that is NOT sky stands in
+     front of the text. Needs sky in the shot. Put the text IN the sky so that the top of the building (roof, tower, statue) cuts
+     into the lower part of the letters - LOOK at a frame first (`look`) to find where the skyline is, then check a rendered frame.
+     After moving/retiming the text or changing the shots under it, run `op behind` again (cut-outs are cached in media/).
    - music: audio item with `fadeIn` 1, `fadeOut` 2, volume ~0.6 under speech (speech clips keep `volume` 1).
    - interviews / speech: `python clipcut.py` auto captions via the Text tab (faster-whisper) or `/api/transcribe`; set captions to
      `montserrat`, size 0.045, `box: true` or `shadow: true`.
@@ -97,7 +101,7 @@ overlay = {id, media, start, in, out, speed, x, y, scale, rotation, flip, volume
           x,y centre as canvas fraction, scale = width fraction; chroma = {color "#00ff00", similarity 0.3, blend 0.1} (green screen);
           mask = {type: rect|circle|linear|mirror, x, y, w, h, feather, invert}. Overlays tagged `_behind` belong to a behind-text.
 audio   = {id, media, start, in, out, speed, volume, fadeIn, fadeOut, denoise, pitch}
-text    = {id, text, start, dur, x, y, size, color, opacity (0..1), behind (bool), font, box, boxcolor, shadow, outline (bool),
+text    = {id, text, start, dur, x, y, size, color, opacity (0..1), behind (true = person | "building"), font, box, boxcolor, shadow, outline (bool),
            anim_in, anim_out, hl, hlcolor, hlscale, sticker}
           size = font px / canvas height. "\n" in `text` = new line.
           fonts: montserrat, playfair (bundled in fonts/, no outline by default) | arial impact georgia comic times (system fonts, black outline;

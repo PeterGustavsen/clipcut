@@ -17,6 +17,30 @@ import cv2, numpy as np
 
 ROOT = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
 MODEL = Path(getattr(sys, "_MEIPASS", Path(__file__).parent)) / "rvm_mobilenetv3_fp32.onnx"
+# sky segmentation (U2Net trained on skies, 176 MB, too big for git): downloaded on first use. Foreground = everything that is NOT sky,
+# so text "behind a building" sits in the sky and buildings, towers, trees and people stand in front of it.
+SKY_MODEL = Path(getattr(sys, "_MEIPASS", Path(__file__).parent)) / "models" / "skyseg.onnx"
+SKY_URL = "https://huggingface.co/JianyuanWang/skyseg/resolve/main/skyseg.onnx"
+
+
+def _sky_session():
+    import onnxruntime as ort, urllib.request
+    if not SKY_MODEL.exists():
+        print("downloading the sky model (176 MB, once) ...", file=sys.stderr)
+        SKY_MODEL.parent.mkdir(exist_ok=True)
+        tmp = SKY_MODEL.with_suffix(".part")
+        urllib.request.urlretrieve(SKY_URL, tmp)
+        tmp.replace(SKY_MODEL)
+    return ort.InferenceSession(str(SKY_MODEL), providers=["CPUExecutionProvider"])
+
+
+def sky_alpha(sess, img):
+    """Foreground alpha 0..1 (1 = building/tree/person, 0 = sky) at the frame's size."""
+    x = cv2.cvtColor(cv2.resize(img, (320, 320), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2RGB).astype(np.float32) / 255
+    x = ((x - (0.485, 0.456, 0.406)) / (0.229, 0.224, 0.225)).transpose(2, 0, 1)[None].astype(np.float32)
+    sky = np.clip(sess.run(None, {sess.get_inputs()[0].name: x})[0][0, 0], 0, 1)
+    sky = cv2.resize(sky, (img.shape[1], img.shape[0]), interpolation=cv2.INTER_CUBIC)
+    return np.clip((0.5 - sky) / 0.3 + 0.5, 0, 1)  # soft edge around the 0.5 boundary
 SUN = "Sonne disc.webm"  # square crop of the PNG with the disc exactly centred, so rotation never wobbles (user 2026-10-16)
 STEP = 0.1  # s between eye samples (render interpolates)
 # Laser eyes look, after CapCut 9.5's "eyelight" package (REA 2026-10-16, effect cache 7399483006278307077): animated light bars on each
@@ -135,12 +159,15 @@ def sun_disc(media_dir):
     return out
 
 
-def cutout(src, a, b, fps, out):
-    """RVM matting of src seconds a..b -> transparent webm `out` (skipped when it exists)."""
+def cutout(src, a, b, fps, out, kind="person"):
+    """RVM matting of src seconds a..b -> transparent webm `out` (skipped when it exists).
+    kind="building": everything except the sky (sky segmentation) instead of the people."""
     import onnxruntime as ort
     out = Path(out)
     if out.exists():
         return out
+    if kind == "building":
+        return _sky_cutout(src, a, b, fps, out)
     sess = ort.InferenceSession(str(MODEL), providers=["CPUExecutionProvider"])
     cap = cv2.VideoCapture(str(src))
     rec = [np.zeros((1, 1, 1, 1), np.float32)] * 4
@@ -165,6 +192,26 @@ def cutout(src, a, b, fps, out):
         tmp_out = out.with_suffix(".tmp.webm")
         clipcut.run([clipcut.FF, "-y", "-framerate", str(fps), "-i", f"{tmp}/%06d.png", "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p",
                      "-b:v", "0", "-crf", "28", "-row-mt", "1", "-deadline", "realtime", "-cpu-used", "8", "-an", str(tmp_out)])
+        shutil.move(tmp_out, out)
+    return out
+
+
+def _sky_cutout(src, a, b, fps, out):
+    import clipcut
+    sess, prev = _sky_session(), None
+    cap = cv2.VideoCapture(str(src))
+    with tempfile.TemporaryDirectory() as tmp:
+        for k in range(max(1, round((b - a) * fps))):
+            img = _frame(cap, a + k / fps)
+            if img is None:
+                break
+            al = sky_alpha(sess, img)
+            prev = al if prev is None or prev.shape != al.shape else 0.6 * al + 0.4 * prev  # ponytail: light temporal smoothing against edge flicker
+            cv2.imwrite(f"{tmp}/{k:06d}.png", np.dstack([img, (prev * 255).astype(np.uint8)]))
+        cap.release()
+        tmp_out = out.with_suffix(".tmp.webm")
+        clipcut.run([clipcut.FF, "-y", "-framerate", str(fps), "-i", f"{tmp}/%06d.png", "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p",
+                     "-b:v", "0", "-crf", "24", "-row-mt", "1", "-deadline", "realtime", "-cpu-used", "8", "-an", str(tmp_out)])
         shutil.move(tmp_out, out)
     return out
 
@@ -304,7 +351,7 @@ def slide(P, i, media_dir, root=ROOT):
 
 
 def behind(P, t, media_dir):
-    """Text t behind the person (CapCut "text behind subject"): for every main-track shot under the text, the RVM cut-out of exactly
+    """Text t behind the person (CapCut "text behind subject"; t.behind == "building": behind everything that is not sky): for every main-track shot under the text, the RVM cut-out of exactly
     that overlap goes on top as an overlay tagged `_behind` = t's id; render + preview draw `behind` texts before the overlays.
     Returns the number of cut-outs. ponytail: plain cover/contain shots only - zoom/shake/keyframes on those shots are removed,
     because the cut-out could not follow them."""
@@ -329,8 +376,9 @@ def behind(P, t, media_dir):
         for k in ("zoom", "zoomTo", "shake", "keyframes"):
             seg.pop(k, None)
         iw, ih = img.shape[1], img.shape[0]
-        name = f"{Path(seg['media']).stem}_{sa:.2f}-{sb:.2f}_cutout.webm"
-        cutout(media_dir / seg["media"], sa, sb, fps, media_dir / name)
+        kind = "building" if t.get("behind") == "building" else "person"
+        name = f"{Path(seg['media']).stem}_{sa:.2f}-{sb:.2f}_{'skycut' if kind == 'building' else 'cutout'}.webm"
+        cutout(media_dir / seg["media"], sa, sb, fps, media_dir / name, kind)
         if fill == "cover":  # same geometry as clipcut.fit_chain
             k = max(CW / iw, CH / ih); sw, sh = iw * k, ih * k
             cx, cy = (min(1, max(0, float(seg.get(c) or 0.5))) for c in ("cx", "cy"))
