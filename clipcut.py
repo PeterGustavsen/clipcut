@@ -11,7 +11,9 @@
   tiktok  SONG CLIP... [--style auto|ironic|phonk|velocity|aura|montage|trending] [--text "WORDS"] [--hook S] [--pace 0.4] [--dumb]
                                                    full automatic "edit" -> project.json, step by step (watchable in the editor)
   trends  refresh [--query "phonk edit"] [--n 10] | show   fingerprint popular TikTok edits (media/_trends/) -> style "trending"
-  op      say MSG | split T | set SEL k=v.. | text "T" START DUR | delete SEL | move SEL IDX | transition IDX TYPE DUR | eyes SEL | behind TEXTID [building] | worldtext SEL "TEXT" [x= y= w= opacity= depth= style=frost|solid font=] | worldtext SEL none
+  op      say MSG | split T | set SEL k=v.. | text "T" START DUR | delete SEL | move SEL IDX | transition IDX TYPE DUR | eyes SEL | behind TEXTID [building] | worldtext SEL "TEXT" [x= y= w= opacity= depth= style=frost|solid font= until= fade= stars=1] | worldtext SEL none
+                                                   | lowerthird "Name" "Rolle" START [DUR] | captions SEL | translate FILE.json [mode=add|replace]
+                                                   | mapintro LAT LON "Label" [dur=7 sub="Köln"]
                                                    one visible edit on project.json (SEL = #index or id); the editor shows it live
   faces   CLIP...                                  build/refresh the star reference from these clips (-> face_ref.json + _star_faces.png)
   check   CLIP                                     where the star is on screen: ranges + contact sheet with green/red frames
@@ -56,6 +58,9 @@ def run(args, cwd=None):
     print(" ".join(map(str, args)), file=sys.stderr)
     return subprocess.run(args, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=cwd,
                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))  # no console flash under pythonw
+
+
+IMAGES = {".png", ".jpg", ".jpeg", ".webp"}
 
 
 def probe(path):
@@ -449,7 +454,10 @@ def sticker_overlay(t, W, H):
 def _dt(t, font, textfile, size, color, x, y, alpha):
     outline = t.get("outline", (t.get("font") or "arial") not in FONTS_BUNDLED)  # pro fonts: clean, no meme outline (set outline: true to force)
     look = (f":box=1:boxcolor={t.get('boxcolor') or 'black'}@0.55:boxborderw={size // 4}" if t.get("box")
-            else f":borderw={max(3, round(size / 14))}:bordercolor=black@0.9" if outline else "")  # outline scales with the size (CapCut)
+            else f":borderw={max(1, round(size / 22))}:bordercolor=black@0.35" if t.get("soft")  # broadcast captions: hairline + soft shadow
+            else f":borderw={max(3, round(size / 14))}:bordercolor=black@0.9" if outline else "")
+    if t.get("soft"):
+        look += f":shadowx=0:shadowy={max(1, round(size / 16))}:shadowcolor=black@0.55"  # outline scales with the size (CapCut)
     if t.get("shadow"):
         look += f":shadowx={max(1, size // 14)}:shadowy={max(1, size // 14)}:shadowcolor=black@0.7"
     fsize, alpha_e, dx, dy, _ = text_anim(t, size)
@@ -470,7 +478,8 @@ def drawtext(t, H, emit=None):
     font, i = font_file(t.get("font") or "arial"), t["_i"]
     if not hl_words(t) and not (t.get("sticker") or {}).get("media"):
         emit(f"t{i}.txt", t["text"])
-        return _dt(t, font, f"t{i}.txt", size, t.get("color", "#ffffff"), f"{t.get('x', 0.5)}*w-text_w/2", f"{t.get('y', 0.85)}*h-text_h/2", None)
+        xe = f"{t.get('x', 0.5)}*w" + ("" if t.get("align") == "left" else "-text_w/2")  # align left: x = left edge (lower thirds)
+        return _dt(t, font, f"t{i}.txt", size, t.get("color", "#ffffff"), xe, f"{t.get('y', 0.85)}*h-text_h/2", None)
     lines, _ = text_layout(t, H)
     k, out = text_anim(t, size)[4], []
     for li, ws in enumerate(lines):
@@ -699,9 +708,10 @@ def render(project, media_dir, out):
 
     def add_input(media):
         nonlocal n_in
-        v = info[media]["video"] or {}
+        v = (info.get(media) or {}).get("video") or {}
         # ffmpeg's native vp9 decoder drops the alpha plane; libvpx keeps it (bg-removed cut-outs)
-        args.extend((["-c:v", "libvpx-vp9"] if v.get("codec_name") == "vp9" else []) + ["-i", path(media)])
+        still = ["-loop", "1", "-framerate", str(fps)] if Path(media).suffix.lower() in IMAGES else []  # logo / lower third PNG
+        args.extend((["-c:v", "libvpx-vp9"] if v.get("codec_name") == "vp9" else []) + still + ["-i", path(media)])
         n_in += 1
         return n_in - 1
 
@@ -830,8 +840,20 @@ def render(project, media_dir, out):
         oh = max(2, round(ow * vi["height"] / vi["width"]) // 2 * 2)
         box = (oh, ow) if o.get("rotation", 0) % 180 == 90 else (ow, oh)  # frame size after the static transpose
         extra, ox, oy = pip_chain(o, *box, st, W, H)  # mask + keyframes
+        fd = o.get("fade") or {}  # alpha fade in/out (lower thirds, logo) - cheap, unlike opacity keyframes (geq)
+        fades_ = "".join(f"fade=t={d}:st={t0:.3f}:d={dd:.3f}:alpha=1," for d, t0, dd in
+                         (("in", st, float(fd.get("in", 0))), ("out", st + seg_len(o) - float(fd.get("out", 0)), float(fd.get("out", 0)))) if dd > 0)
+        gl = o.get("glass")  # glassmorphism: the video behind the card's mask is blurred (fades with the card)
+        if gl and gl.get("mask"):
+            km, en, sg = add_input(gl["mask"]), f"between(t,{st},{st + seg_len(o)})", float(gl.get("blur", 26)) * H / 1080
+            f.append(f"{v}split[ga{j}][gb{j}]")
+            f.append(f"[gb{j}]gblur=sigma={sg:.1f}:enable='{en}'[gc{j}]")
+            f.append(f"[{km}:v]trim=0:{seg_len(o):.3f},setpts=PTS-STARTPTS+{st}/TB,scale={W}:{H},format=gray[gm{j}]")
+            f.append(f"[gc{j}][gm{j}]alphamerge,format=yuva420p,{fades_}format=yuva420p[gg{j}]")
+            f.append(f"[ga{j}][gg{j}]overlay=eof_action=pass:enable='{en}'[gv{j}]")
+            v = f"[gv{j}]"
         f.append(f"[{k}:v]trim={o['in']}:{o['out']},setpts=(PTS-STARTPTS)/{sp}+{st}/TB,format=yuva420p,"
-                 f"scale={ow}:{oh},{geometry(o)}format=yuva420p,{extra}format=yuva420p[o{j}]")
+                 f"scale={ow}:{oh},{geometry(o)}format=yuva420p,{extra}{fades_}format=yuva420p[o{j}]")
         f.append(f"{v}[o{j}]overlay=x={ox}:y={oy}:eof_action=pass"
                  f":enable='between(t,{st},{st + seg_len(o)})'[ov{j}]")
         v = f"[ov{j}]"
@@ -1086,6 +1108,86 @@ def op(args, root=ROOT):
             if not sticker_overlay(x, *(P.get("canvas") or [1080, 1920])):
                 raise SystemExit(f"no word {rest[1]!r} in text {rest[0]}")
             msg = f"Sticker {rest[2]} after '{rest[1]}' of {rest[0]}"
+    elif cmd == "lowerthird":  # op lowerthird "Name" "Rolle" START [DUR] : branded lower third (brand.py, school colours + logo)
+        import brand
+        name, role, st = rest[0], (rest[1] if len(rest) > 1 else ""), float(rest[2] if len(rest) > 2 else 0)
+        dur = float(rest[3]) if len(rest) > 3 else 4.5
+        W, H = P.get("canvas") or [int(probe(str(Path(root) / "media" / P["video"][0]["media"]))["video"][k]) for k in ("width", "height")]
+        g = uid()
+        art, mask = brand.lowerthird_glass(name, role, W, H)  # glassmorphism card in the school colours + logo
+        art.save(Path(root) / "media" / f"_lt_{g}.png"); mask.save(Path(root) / "media" / f"_lt_{g}_mask.png")
+        P["overlay"].append({"id": g, "media": f"_lt_{g}.png", "start": st, "in": 0, "out": dur, "speed": 1, "x": 0.5, "y": 0.5,
+                             "scale": 1, "volume": 0, "lt": {"name": name, "role": role}, "fade": {"in": 0.45, "out": 0.4},
+                             "glass": {"mask": f"_lt_{g}_mask.png", "blur": 26}})
+        msg = f"Bauchbinde '{name}' at {st:.2f}s"
+    elif cmd == "logo":  # op logo [corner=tr|tl|br|bl] [start=0] [dur=<all>] [size=0.05] : school logo (brand.py), white + gold
+        import brand
+        kw = dict(kv.split("=", 1) for kv in rest)
+        W, H = P.get("canvas") or [int(probe(str(Path(root) / "media" / P["video"][0]["media"]))["video"][k]) for k in ("width", "height")]
+        total = sum(seg_len(v) for v in P["video"]) or 10
+        st = float(kw.get("start", 0)); dur = float(kw.get("dur", total - st))
+        h = round(float(kw.get("size", 0.042)) * min(W, H))
+        h = min(h, round(0.3 * W / 9.5))  # the wide logo is ~9.5x as wide as tall: at most 30 % of the frame width
+        g = uid()
+        im = brand.logo(h, wide=True, shadow=True)
+        im.save(Path(root) / "media" / f"_logo_{g}.png")
+        sc = im.width / W
+        c = kw.get("corner", "tr")
+        mx, my = 0.035, 0.035 * W / H
+        x = 1 - mx - sc / 2 if c[1] == "r" else mx + sc / 2
+        y = my + h / H / 2 if c[0] == "t" else 1 - my - h / H / 2
+        P["overlay"].append({"id": g, "media": f"_logo_{g}.png", "start": st, "in": 0, "out": dur, "speed": 1, "x": round(x, 4),
+                             "y": round(y, 4), "scale": round(sc, 4), "opacity": 0.92, "volume": 0, "logo": True, "fade": {"in": 0.6, "out": 0.6}})
+        msg = f"Logo {c} from {st:.1f}s"
+    elif cmd == "captions":  # op captions SEL [size=0.045] | op captions SEL none : subtitles from the speech of one main-track shot
+        k, i, x = find(rest[0])
+        if k != "video":
+            raise SystemExit("captions needs a main-track shot (#index or id)")
+        P["text"] = [t for t in P["text"] if t.get("cap") != x["id"]]
+        if rest[1:2] == ["none"]:
+            msg = f"Captions removed from {rest[0]}"
+        else:
+            kw = dict(kv.split("=", 1) for kv in rest[1:])
+            r = transcribe(str(Path(root) / "media" / x["media"]))
+            cw, ch = P.get("canvas") or [int(probe(str(Path(root) / "media" / x["media"]))["video"][k]) for k in ("width", "height")]
+            maxc = 42 if cw >= ch else 28  # characters per cue line: landscape / portrait
+            size = float(kw.get("size", min(0.045, 0.9 * cw / (maxc * 0.6) / ch)))  # a full line fits 90 % of the width
+            sp, t0 = float(x.get("speed", 1) or 1), tl_layout(P)[i]
+            words = [w for w in r["words"] if x["in"] <= w["s"] < x["out"]]
+            cues, cur = [], []
+            for j, w in enumerate(words):  # cue = up to ~42 characters / 3 s, broken at pauses and sentence ends
+                cur.append(w)
+                txt = " ".join(c["w"] for c in cur)
+                nxt = words[j + 1] if j + 1 < len(words) else None
+                if (nxt is None or len(txt) + len(nxt["w"]) > maxc or nxt["s"] - w["e"] > 0.6 or w["e"] - cur[0]["s"] > 3.0
+                        or w["w"][-1:] in ".!?"):
+                    cues.append((cur[0]["s"], w["e"], txt)); cur = []
+            new = []
+            for a, b, txt in cues:
+                ts = t0 + (a - x["in"]) / sp
+                new.append({"id": uid(), "text": txt, "start": round(ts, 3), "dur": round(max(0.6, (b - a) / sp + 0.15), 3),
+                            "x": 0.5, "y": 0.9, "size": size, "font": "montserrat", "color": "#ffffff",
+                            "soft": True, "cap": x["id"], "lang": r["language"]})
+            P["text"] += new
+            print(json.dumps([{"id": t["id"], "text": t["text"]} for t in new], ensure_ascii=False))
+            msg = f"{len(new)} captions ({r['language']}) on {rest[0]}"
+    elif cmd == "translate":  # op translate FILE.json [mode=add|replace] : {"<caption id>": "translation", ...}
+        tr = json.loads(Path(rest[0]).read_text(encoding="utf-8"))
+        mode = dict(kv.split("=", 1) for kv in rest[1:]).get("mode", "add")
+        P["text"] = [t for t in P["text"] if t.get("tr_of") not in tr]  # re-translating replaces the old line
+        n, add = 0, []
+        for t in P["text"]:
+            if t["id"] not in tr:
+                continue
+            n += 1
+            if mode == "replace":
+                t["orig"] = t.get("orig", t["text"]); t["text"] = tr[t["id"]]
+            else:  # second language: its own line under the caption, smaller, in the school's light gold
+                t["y"] = 0.875
+                add.append({**t, "id": uid(), "text": tr[t["id"]], "y": 0.875 + t["size"] * 1.25, "size": round(t["size"] * 0.8, 4),
+                            "color": "#f6dc9a", "tr_of": t["id"], "cap": t.get("cap")})
+        P["text"] += add
+        msg = f"Translated {n} captions ({mode})"
     elif cmd == "delete":
         k, i, x = find(rest[0]); P[k].pop(i); msg = f"Deleted {rest[0]}"
     elif cmd == "move":

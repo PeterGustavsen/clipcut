@@ -58,8 +58,16 @@ Goal: calm, clean, PROFESSIONAL - like a good documentary or an image film, not 
      covers the shot's in..out). Checked 2026-11-25: Lessing drone push-in (solve 0.46 px; independent SIFT 3-view check
      around the text <= 1.7 px over the whole 8 s - the old 2D tracker drifted 20+ px), Brandenburger Tor handheld.
    - music: audio item with `fadeIn` 1, `fadeOut` 2, volume ~0.6 under speech (speech clips keep `volume` 1).
-   - interviews / speech: `python clipcut.py` auto captions via the Text tab (faster-whisper) or `/api/transcribe`; set captions to
-     `montserrat`, size 0.045, `box: true` or `shadow: true`.
+   - interviews / speech -> subtitles in ONE command: `op captions #N` (faster-whisper, language detected automatically, prints
+     the cues as JSON [{id, text}]). Style = broadcast: white Montserrat, hairline + soft shadow, no boxes (never TikTok-style
+     boxes/colours for the school). Second language: translate the printed cues yourself, write {"<id>": "translation", ...} to
+     tmp/tr.json, `op translate tmp/tr.json` -> a smaller second line in light gold under each cue (`mode=replace` = only
+     the translation). Proof-read the transcript (names, school words) with `op set <id> text="..."`.
+   - SCHOOL BRANDING (automatic, brand.py - Lessing-Gymnasium Köln colours: blue #375e80, gold #ffc02b, the re-drawn logo):
+     `op lowerthird "Name" "Rolle / Klasse" START [DUR]` = glassmorphism card (the video behind it blurred, light Lessing-blue
+     veil, gold accent, school logo on the right), fades in/out, sits above the subtitles. Use for every person who speaks.
+     `op logo [corner=tr] [start=] [dur=]` = the white/gold school logo small in a corner (whole video by default; use it on
+     the intro/outro or throughout, not both with a big title). `python brand.py logo out.png [--wide] [--tagline]` = logo file.
 3. Render: `python clipcut.py render project.json media/fertig.mp4`, then LOOK at frames
    (`ffmpeg -ss T -i media/fertig.mp4 -frames:v 1 tmp/f.png`) before telling the user it is done.
 Privacy: footage of students stays on this computer; only the contact sheets you read leave it. Never upload media anywhere.
@@ -94,6 +102,10 @@ python clipcut.py op text "EUROPA" 3.0 2.0                     text at 3.0 s for
 python clipcut.py op behind <textid> [building]                put that text behind the person / building (cut-outs on top)
 python clipcut.py op worldtext #N "TEXT" y=0.37 w=0.95         big 3D frosted text pinned in the scene behind a building (bakes the shot)
 python clipcut.py op worldtext #N none                         remove it again (back to the original footage)
+python clipcut.py op lowerthird "Annika Fink" "Lehrerin" 3.0    branded glass lower third at 3.0 s (4.5 s)
+python clipcut.py op logo corner=tr                            school logo in the top right corner
+python clipcut.py op captions #2                               subtitles for main-track shot #2 (prints the cues to translate)
+python clipcut.py op translate tmp/tr.json                     second-language line under each cue ({id: text})
 python clipcut.py op transition #3 dissolve 0.6                transition after clip #3
 python clipcut.py op move #6 1 | op delete #2
 python clipcut.py beats media/SONG.mp3                         {bpm, beats, strong (accents), drop (s)}
@@ -157,4 +169,4 @@ macOS: double-click `start.command` (installs into `.venv` on the first run; nee
 Windows: `pip install -r requirements.txt`, ffmpeg on PATH, `start.bat`. Or `python server.py` -> editor on http://127.0.0.1:8777.
 On the Mac use `.venv/bin/python clipcut.py ...` (or activate the venv) so the installed packages are found.
 Checks: `python clipcut.py selftest` (logic), `python clipcut.py rendertest` (2 s render through every feature),
-`python copy_edit.py`, `python trends.py`, `python transitions.py`, `python worldtext.py selftest`.
+`python copy_edit.py`, `python trends.py`, `python transitions.py`, `python worldtext.py selftest`, `python brand.py selftest`.

@@ -686,7 +686,10 @@ function elFor(item, tag) {
   let el = els.get(item.id);
   if (!el || el.dataset.media !== item.media) {
     el?.pause();
-    el = document.createElement(tag); el.dataset.media = item.media; el.src = mediaURL(item.media); el.preload = 'auto'; el.playsInline = true;
+    if (tag === 'video' && /\.(png|jpe?g|webp)$/i.test(item.media)) {   // still image overlay (logo, lower third): behaves like a paused video
+      el = new Image(); el.src = mediaURL(item.media); el.dataset.media = item.media; el.paused = true; el.pause = () => {}; el.play = () => Promise.resolve();
+      Object.defineProperties(el, { videoWidth: { get: () => el.naturalWidth }, videoHeight: { get: () => el.naturalHeight }, readyState: { get: () => el.complete && el.naturalWidth ? 4 : 0 } });
+    } else { el = document.createElement(tag); el.dataset.media = item.media; el.src = mediaURL(item.media); el.preload = 'auto'; el.playsInline = true; }
     els.set(item.id, el);
   }
   return el;
@@ -801,15 +804,16 @@ for (const [fam, file] of [['Montserrat', 'Montserrat-SemiBold.ttf'], ['Playfair
 }
 function drawText(t, W) {
   const an = textAnim(t), k = cv.width / W, size = Math.max(8, Math.round((t.size || 0.06) * canvasSize()[1])) * k * an.k;
-  ctx.save(); ctx.globalAlpha = an.alpha * (t.opacity ?? 1); ctx.font = `bold ${size}px ${FONT_CSS[t.font] || 'Arial'}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.save(); ctx.globalAlpha = an.alpha * (t.opacity ?? 1); ctx.font = `bold ${size}px ${FONT_CSS[t.font] || 'Arial'}`; ctx.textAlign = t.align === 'left' ? 'left' : 'center'; ctx.textBaseline = 'middle';
   const lines = (an.chars < Infinity ? t.text.slice(0, an.chars) : t.text).split('\n'), lh = size * 1.15;
   const cx = ((t.x ?? 0.5) + an.dx) * cv.width, cy = ((t.y ?? 0.85) + an.dy) * cv.height;
   const hl = hlWords(t), fontOf = px => `bold ${px}px ${FONT_CSS[t.font] || 'Arial'}`, hs = size * Math.max(1, +t.hlscale || HL_SCALE);
   const draw = (s, x, y, px, color) => {   // one word or line: box / outline, then the fill
     ctx.font = fontOf(px);
-    if (t.shadow) { ctx.shadowColor = 'rgba(0,0,0,.7)'; ctx.shadowBlur = px / 8; ctx.shadowOffsetX = ctx.shadowOffsetY = px / 14; } else ctx.shadowColor = 'transparent';
+    if (t.soft) { ctx.shadowColor = 'rgba(0,0,0,.6)'; ctx.shadowBlur = px / 6; ctx.shadowOffsetX = 0; ctx.shadowOffsetY = px / 16; }   // broadcast captions
+    else if (t.shadow) { ctx.shadowColor = 'rgba(0,0,0,.7)'; ctx.shadowBlur = px / 8; ctx.shadowOffsetX = ctx.shadowOffsetY = px / 14; } else ctx.shadowColor = 'transparent';
     if (t.box) { const w = ctx.measureText(s).width, p = px / 4, [br, bg, bb] = hexRGB(t.boxcolor || '#000000'), x0 = ctx.textAlign === 'left' ? x : x - w / 2; ctx.fillStyle = `rgba(${br},${bg},${bb},.55)`; ctx.fillRect(x0 - p, y - px / 2 - p, w + 2 * p, px + 2 * p); }
-    else if (t.outline ?? !['montserrat', 'playfair'].includes(t.font)) { ctx.lineWidth = 6 * k * px / size; ctx.strokeStyle = 'rgba(0,0,0,.85)'; ctx.strokeText(s, x, y); }
+    else if (!t.soft && (t.outline ?? !['montserrat', 'playfair'].includes(t.font))) { ctx.lineWidth = 6 * k * px / size; ctx.strokeStyle = 'rgba(0,0,0,.85)'; ctx.strokeText(s, x, y); }
     ctx.fillStyle = color; ctx.fillText(s, x, y);
   };
   const st = t.sticker?.media ? t.sticker : null, norm = w => w.replace(HL_PUNCT, '').toLowerCase();
@@ -892,7 +896,8 @@ function tick(now) {
     if (local >= 0 && local < len && T < end) {
       live.add(el);
       syncMedia(el, o.in + local * (o.speed || 1), o.speed || 1, trackState[kind].mute ? 0 : (o.volume ?? 1) * fadeGain(o, local, len));
-      if (kind === 'overlay' && !trackState.overlay.hide) drawVideo(el, o, 1, [(o.x ?? 0.5) * cw, (o.y ?? 0.5) * ch, (o.scale ?? 0.5) * cw, 0], 0, 'contain', local);
+      const fa = o.fade ? clamp(Math.min(local / (o.fade.in || 1e-3), (len - local) / (o.fade.out || 1e-3)), 0, 1) : 1;   // overlay fade in/out (lower thirds)
+      if (kind === 'overlay' && !trackState.overlay.hide) drawVideo(el, o, fa, [(o.x ?? 0.5) * cw, (o.y ?? 0.5) * ch, (o.scale ?? 0.5) * cw, 0], 0, 'contain', local);
     }
   }
   for (const el of els.values()) if (!live.has(el) && !el.paused) el.pause();
