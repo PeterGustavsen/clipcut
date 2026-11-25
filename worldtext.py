@@ -1,9 +1,11 @@
 """worldtext.py - big 3D "frosted glass" text that STAYS IN PLACE in the scene (After Effects 3D camera tracker look), 2026-11-25.
 
-The text stands behind a building like a real, huge sign: it is pinned to the background around it (Lucas-Kanade points on
-far pixels only, similarity transform per frame relative to the first frame, then the whole camera path is smoothed), so when
-the camera/drone moves, the text moves, turns and grows exactly like that part of the scene. Everything nearer than the
-background - the building, people on the roof, trees - covers it (depth matte: fxface.depth_map, Otsu near/far split).
+The text stands behind a building like a real, huge sign: a 3D camera tracker (Lucas-Kanade tracks -> essential matrix ->
+incremental PnP + bundle adjustment with focal length and lens distortion, scipy) rebuilds the drone/camera path and the scene
+as ~3000 3D points; the sign is then an upright plane standing at the depth of the scene behind the letters (ground plane =
+"up"), projected into every frame. So it stays exactly where it stands while the camera flies in, with real perspective.
+A camera that only turns / stands still has no depth: then one homography per frame (exact for pure rotation). Everything
+nearer than the background - the building, people on the roof, trees - covers it (depth matte: fxface.depth_map, Otsu split).
 
 Style "frost" (default): milky, slightly transparent glass letters - the scene behind each letter is blurred and lightened,
 a 3D extrusion in milky grey, a thin light rim on the top edges and a soft drop shadow. Style "solid": white letters + grey
@@ -22,7 +24,7 @@ import cv2, numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).parent
-VERSION = "frost-6"  # bump when the look changes, so cached bakes are redone
+VERSION = "frost-7-3d"  # bump when the look changes, so cached bakes are redone
 SIDE = 0.45  # extrusion brightness (frost): lower = more 3D contrast against the milky face
 BUNDLED = {"montserrat": "Montserrat-SemiBold.ttf", "playfair": "PlayfairDisplay-Bold.ttf", "impact": "Anton-Regular.ttf"}
 
@@ -85,62 +87,312 @@ def compose(img, L, fg, opacity=0.8, style="frost"):
     return (np.clip(x, 0, 1) * 255).astype(np.uint8)
 
 
-def track(frames_iter, n, box0, FW, FH, log=print):
-    """Pass 1: [(tx, ty, log scale, rotation)] per frame (frame 0 -> frame k), smoothed. frames_iter yields (k, gray, fg)."""
+def tracks(grays):
     lp = dict(winSize=(21, 21), maxLevel=4, criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01))
-    prev_g = p_cur = p0 = None
-    M = np.eye(3, dtype=np.float32)
-    raw = []
-    for k, g, fg in frames_iter:
-        if k:
-            p_new, st, _ = cv2.calcOpticalFlowPyrLK(prev_g, g, p_cur, None, **lp)
-            p_back, st2, _ = cv2.calcOpticalFlowPyrLK(g, prev_g, p_new, None, **lp)  # forward-backward check
-            fb = np.linalg.norm((p_back - p_cur).reshape(-1, 2), axis=1)
-            q = np.clip(p_new.reshape(-1, 2).round().astype(int), 0, [FW - 1, FH - 1])
-            # drop points the building now covers: at an occluding edge they slide along it and drag the text with the roof
-            ok = (st.ravel() == 1) & (st2.ravel() == 1) & (fb < 0.5) & (fg[q[:, 1], q[:, 0]] < 0.2)
-            p0, p_cur = p0[ok], p_new[ok]
-            if len(p0) >= 8:
-                A, inl = cv2.estimateAffinePartial2D(p0, p_cur, method=cv2.RANSAC, ransacReprojThreshold=2.0)
-                if A is not None:
-                    M = np.vstack([A, [0, 0, 1]]).astype(np.float32)
-                    p0, p_cur = p0[inl.ravel() == 1], p_cur[inl.ravel() == 1]
-        if p0 is None or len(p0) < 150:  # top up: background points around where the text stands now, far pixels only
-            # anchor = what lies right behind the letters (the eye judges the text against exactly that; with parallax a
-            # farther or nearer plane would make it visibly slide over the scene). Base-only anchoring was tried: the foot
-            # of a text "behind" a building stands on ground the building hides, so it has nothing visible to hold on to.
-            box = cv2.perspectiveTransform(box0, M).reshape(-1, 2)
-            x0, y0 = box.min(0); x1, y1 = box.max(0)
-            mx, my = (x1 - x0) * 0.15, (y1 - y0) * 0.3
-            roi = np.zeros(g.shape, np.uint8)
-            roi[int(np.clip(y0 - my, 0, FH)):int(np.clip(y1 + my, 0, FH)), int(np.clip(x0 - mx, 0, FW)):int(np.clip(x1 + mx, 0, FW))] = 1
-            roi &= (fg < 0.3).astype(np.uint8)  # the building moves differently (parallax): never track it
-            pts = cv2.goodFeaturesToTrack(g, 400, 0.01, 8, mask=roi * 255)
-            if pts is None or len(pts) < 40:  # plain sky / wall behind the letters: follow the whole background instead
-                far = (fg < 0.3).astype(np.uint8) * 255
-                pts = cv2.goodFeaturesToTrack(g, 400, 0.01, 8, mask=far)
-            if pts is not None:
-                pts = pts.astype(np.float32)
-                new0 = cv2.perspectiveTransform(pts, np.linalg.inv(M))
-                p0 = new0 if p0 is None else np.concatenate([p0, new0])
-                p_cur = pts if p_cur is None else np.concatenate([p_cur, pts])
-        prev_g = g
-        raw.append((M[0, 2], M[1, 2], np.log(np.sqrt(abs(np.linalg.det(M[:2, :2])))), np.arctan2(M[1, 0], M[0, 0])))
-        if k % 30 == 0:
-            log(f"world text: tracking {k}/{n}, {0 if p0 is None else len(p0)} points")
-    # like a tracker's smooth pass: median 7 against jumps, then Gaussian sigma 3 frames
-    R = np.array(raw, np.float64)
-    if len(R) > 7:
-        pad = np.pad(R, ((3, 3), (0, 0)), mode="reflect", reflect_type="odd")  # odd reflection keeps the motion going at the ends
-        R = np.median(np.stack([pad[i:i + len(R)] for i in range(7)]), 0)
-        ker = np.exp(-0.5 * (np.arange(-9, 10) / 3.0) ** 2); ker /= ker.sum()
-        R = np.stack([np.convolve(np.pad(R[:, j], 9, mode="reflect", reflect_type="odd"), ker, "valid") for j in range(4)], 1)
-    return R
+    n, (H, W) = len(grays), grays[0].shape
+    T = []  # list of arrays (n, 2) with nan
+    pts = np.zeros((0, 1, 2), np.float32); ids = np.zeros(0, int)
+    for k, g in enumerate(grays):
+        if k and len(pts):
+            p1, st, _ = cv2.calcOpticalFlowPyrLK(grays[k - 1], g, pts, None, **lp)
+            p2, st2, _ = cv2.calcOpticalFlowPyrLK(g, grays[k - 1], p1, None, **lp)
+            fb = np.linalg.norm((p2 - pts).reshape(-1, 2), axis=1)
+            inb = (p1[:, 0, 0] >= 0) & (p1[:, 0, 0] < W) & (p1[:, 0, 1] >= 0) & (p1[:, 0, 1] < H)
+            ok = (st.ravel() == 1) & (st2.ravel() == 1) & (fb < 0.5) & inb
+            pts, ids = p1[ok], ids[ok]
+        for i, p in zip(ids, pts.reshape(-1, 2)):
+            T[i][k] = p
+        if len(pts) < 1500:
+            mask = np.full((H, W), 255, np.uint8)
+            for p in pts.reshape(-1, 2):
+                cv2.circle(mask, (int(p[0]), int(p[1])), 10, 0, -1)
+            new = cv2.goodFeaturesToTrack(g, 2000 - len(pts), 0.01, 10, mask=mask)
+            if new is not None:
+                nid = np.arange(len(T), len(T) + len(new))
+                for i, p in zip(nid, new.reshape(-1, 2)):
+                    a = np.full((n, 2), np.nan, np.float32); a[k] = p; T.append(a)
+                pts = np.concatenate([pts, new.astype(np.float32)]); ids = np.concatenate([ids, nid])
+    return np.array(T)  # (m, n, 2)
+
+def triangulate(K, P1, P2, x1, x2):
+    X = cv2.triangulatePoints(K @ P1, K @ P2, x1.T.astype(np.float64), x2.T.astype(np.float64))
+    return (X[:3] / X[3]).T
+
+def proj(K, R, t, X):
+    x = (K @ (R @ X.T + t.reshape(3, 1))).T
+    return x[:, :2] / x[:, 2:3], x[:, 2]
+
+def _angle(K, Pa, Pb, xa, xb):
+    Ki = np.linalg.inv(K)
+    da = (Pa[:, :3].T @ (Ki @ np.c_[xa, np.ones(len(xa))].T)).T
+    db = (Pb[:, :3].T @ (Ki @ np.c_[xb, np.ones(len(xb))].T)).T
+    c = (da * db).sum(1) / np.linalg.norm(da, axis=1) / np.linalg.norm(db, axis=1)
+    return np.degrees(np.arccos(np.clip(c, -1, 1)))
 
 
-def _M(tx, ty, ls, rot):
-    s = np.exp(ls)
-    return np.float32([[s * np.cos(rot), -s * np.sin(rot), tx], [s * np.sin(rot), s * np.cos(rot), ty], [0, 0, 1]])
+def _tri_check(K, Pa, Pb, xa, xb, thr=2.0):
+    X = triangulate(K, Pa, Pb, xa, xb)
+    ok = np.isfinite(X).all(1)
+    for P, x in ((Pa, xa), (Pb, xb)):
+        p, z = proj(K, P[:, :3], P[:, 3], np.nan_to_num(X))
+        ok &= (z > 0) & (np.linalg.norm(p - x, axis=1) < thr)
+    return X, ok
+
+
+def _pnp(K, X, x, guess):
+    """Pose from 3D-2D matches, started from the previous frame's pose (tiny motion between frames): Levenberg-Marquardt on
+    all points, then on the points that fit (error < max(1 px, 3 x median)), twice. RANSAC was tried: on this mostly flat
+    aerial scene its minimal samples are degenerate and it returned wild poses."""
+    if len(X) < 12:
+        return None
+    rv, tv = guess[0].copy().reshape(3, 1), guess[1].copy().reshape(3, 1)
+    keep = np.ones(len(X), bool)
+    for _ in range(4):
+        rv, tv = cv2.solvePnPRefineLM(X[keep], x[keep], K, None, rv, tv)
+        p, _ = cv2.projectPoints(X, rv, tv, K, None)
+        e = np.linalg.norm(p.reshape(-1, 2) - x, axis=1)
+        keep = e < max(1.0, 3 * np.median(e))
+    if keep.sum() < max(10, 0.3 * len(X)) or np.median(e[keep]) > 2.0:
+        return None
+    return rv.ravel(), tv.ravel()
+
+
+def _P(pose):
+    return np.hstack([cv2.Rodrigues(pose[0])[0], pose[1].reshape(3, 1)])
+
+
+def _rot(rv):
+    """Rodrigues for many vectors at once: (N,3) -> (N,3,3)."""
+    th = np.linalg.norm(rv, axis=1)[:, None, None] + 1e-12
+    k = rv / th[:, :, 0]
+    Kx = np.zeros((len(rv), 3, 3))
+    Kx[:, 0, 1], Kx[:, 0, 2], Kx[:, 1, 0], Kx[:, 1, 2], Kx[:, 2, 0], Kx[:, 2, 1] = -k[:, 2], k[:, 1], k[:, 2], -k[:, 0], -k[:, 1], k[:, 0]
+    return np.eye(3) + np.sin(th) * Kx + (1 - np.cos(th)) * Kx @ Kx
+
+
+def bundle(K, dist, poses, X, T, vis, frames, log=print, iters=40):
+    """Bundle adjustment (scipy least_squares, sparse Jacobian, soft-L1 loss) over `frames` (frame 0 stays fixed) and all
+    3D points seen there; also refines the focal length."""
+    from scipy.optimize import least_squares
+    from scipy.sparse import lil_matrix
+    frames = [k for k in frames if k > 0]
+    pts = np.where(~np.isnan(X[:, 0]))[0]
+    fi = {k: j for j, k in enumerate(frames)}; pi = {p: j for j, p in enumerate(pts)}
+    obs_k, obs_p = [], []
+    for k in [0] + frames:
+        p = pts[vis[pts, k]]
+        obs_k += [k] * len(p); obs_p += list(p)
+    obs_k, obs_p = np.array(obs_k), np.array(obs_p)
+    uv = T[obs_p, obs_k]
+    nf, npt = len(frames), len(pts)
+    x0 = np.concatenate([[K[0, 0], dist[0], dist[1]], np.concatenate([np.r_[poses[k][0], poses[k][1]] for k in frames]) if nf else [], X[pts].ravel()])
+    cam_j = np.array([fi.get(k, -1) for k in obs_k]); pt_j = np.array([pi[p] for p in obs_p])
+    cx, cy = K[0, 2], K[1, 2]
+    O = 3
+
+    def res(v):
+        f, k1, k2 = v[:3]
+        C = np.vstack([np.zeros((1, 6)), v[O:O + 6 * nf].reshape(nf, 6)])  # row 0 = fixed frame 0
+        P = v[O + 6 * nf:].reshape(npt, 3)
+        R = _rot(C[:, :3])
+        Xc = np.einsum("nij,nj->ni", R[cam_j + 1], P[pt_j]) + C[cam_j + 1, 3:]
+        a, b = Xc[:, 0] / Xc[:, 2], Xc[:, 1] / Xc[:, 2]
+        r2 = a * a + b * b
+        d = 1 + k1 * r2 + k2 * r2 * r2  # radial lens distortion (wide drone/phone lenses)
+        return np.concatenate([(f * a * d + cx - uv[:, 0]), (f * b * d + cy - uv[:, 1])])
+
+    m = len(obs_k)
+    A = lil_matrix((2 * m, len(x0)), dtype=np.uint8)
+    rows = np.arange(m)
+    for r0 in (0, m):
+        for c in range(O):
+            A[r0 + rows, c] = 1
+        sel = cam_j >= 0
+        for c in range(6):
+            A[r0 + rows[sel], O + 6 * cam_j[sel] + c] = 1
+        for c in range(3):
+            A[r0 + rows, O + 6 * nf + 3 * pt_j + c] = 1
+    r = least_squares(res, x0, jac_sparsity=A, loss="soft_l1", f_scale=1.0, x_scale="jac", method="trf", tr_solver="lsmr", max_nfev=iters)
+    v = r.x
+    K = K.copy(); K[0, 0] = K[1, 1] = v[0]
+    for j, k in enumerate(frames):
+        poses[k] = (v[O + 6 * j:O + 3 + 6 * j], v[O + 3 + 6 * j:O + 6 + 6 * j])
+    X[pts] = v[O + 6 * nf:].reshape(npt, 3)
+    e = np.abs(r.fun).reshape(2, -1)
+    e = np.hypot(e[0], e[1])
+    pe = np.bincount(pt_j, e, npt) / np.maximum(np.bincount(pt_j, None, npt), 1)
+    X[pts[pe > 2.5]] = np.nan  # points that don't fit (moving people, bad tracks) are dropped
+    log(f"bundle: {nf + 1} frames, {npt} points, f={v[0]:.0f}, k1={v[1]:.3f}, k2={v[2]:.3f}, median error {np.median(e):.2f}px")
+    return K, np.array([v[1], v[2], 0, 0, 0])
+
+
+def solve(T, f, W, H, log=print, step=3):
+    """Incremental camera solve with bundle adjustment: init from frame 0 + first frame with enough parallax, PnP frame by
+    frame, new tracks triangulated once their rays differ by > 3 deg, global bundle adjustment every 60 frames and at the end."""
+    cv2.setRNGSeed(0)
+    m, n, _ = T.shape
+    T = T.astype(np.float64)
+    K = np.array([[f, 0, W / 2], [0, f, H / 2], [0, 0, 1]], np.float64)
+    vis = ~np.isnan(T[..., 0])
+    T0, dist = T, np.zeros(5)
+
+    def und(K, dist):  # undistorted pixel tracks (pinhole) for the PnP / triangulation steps
+        u = T0.copy()
+        u[vis] = cv2.undistortPoints(T0[vis].reshape(-1, 1, 2), K, dist, P=K).reshape(-1, 2)
+        return u
+    init = None
+    for k1 in range(max(2, n // 10), n, max(1, n // 30)):
+        c = np.where(vis[:, 0] & vis[:, k1])[0]
+        if len(c) < 60: break
+        E, inl = cv2.findEssentialMat(T[c, 0], T[c, k1], K, cv2.RANSAC, 0.999, 1.0)
+        if E is None or E.shape != (3, 3): continue
+        cnt, R, t, inl2 = cv2.recoverPose(E, T[c, 0], T[c, k1], K, mask=inl.copy())
+        ci = c[inl2.ravel() > 0]
+        if len(ci) < 50: continue
+        P1 = np.hstack([R, t])
+        Xi, ok = _tri_check(K, np.eye(3, 4), P1, T[ci, 0], T[ci, k1])
+        ang = np.median(_angle(K, np.eye(3, 4), P1, T[ci, 0], T[ci, k1])) if len(ci) else 0
+        if ok.sum() >= 50 and ang > 1.0:  # below 1 deg the camera only turned: no depth to recover
+            init = (k1, ci[ok], Xi[ok], cv2.Rodrigues(R)[0].ravel(), t.ravel())
+            if ang > 2.0: break
+    if init is None:
+        raise ValueError("world text: the camera barely moves (or too little texture) - no 3D solve possible")
+    k1, ci, Xi, r1, t1 = init
+    X = np.full((m, 3), np.nan); X[ci] = Xi
+    poses = [None] * n
+    poses[0] = (np.zeros(3), np.zeros(3)); poses[k1] = (r1, t1)
+    K, dist = bundle(K, dist, poses, X, T0, vis, [k1], log); T = und(K, dist)
+    first = np.argmax(vis, 1)
+    done = [0]
+    for k in range(1, n):
+        ok = vis[:, k] & ~np.isnan(X[:, 0])
+        p = _pnp(K, X[ok], T[ok, k], poses[k - 1])
+        poses[k] = p if p is not None else poses[k - 1]
+        if p is None: log(f"frame {k}: pose lost, kept previous")
+        done.append(k)
+        cand = np.where(vis[:, k] & np.isnan(X[:, 0]) & (first < k))[0]
+        if len(cand):
+            Pk = _P(poses[k])
+            for a in np.unique(first[cand]):
+                ii = cand[first[cand] == a]
+                Pa = _P(poses[a])
+                ii = ii[_angle(K, Pa, Pk, T[ii, a], T[ii, k]) > 3.0]
+                if len(ii):
+                    Xn, okn = _tri_check(K, Pa, Pk, T[ii, a], T[ii, k], 2.0)
+                    X[ii[okn]] = Xn[okn]
+        if k % 60 == 0 or k == n - 1:  # 30 / every 2nd frame: same accuracy, 2.5x slower
+            K, dist = bundle(K, dist, poses, X, T0, vis, done[::step] + ([k] if k % step else []), log, iters=20 if k < n - 1 else 40); T = und(K, dist)
+            # frames skipped by the bundle: re-PnP them against the refined points
+            for j in done:
+                if j % step and j != k:
+                    o = vis[:, j] & ~np.isnan(X[:, 0])
+                    p = _pnp(K, X[o], T[o, j], poses[j])
+                    if p is not None: poses[j] = p
+    Ps = [_P(p) for p in poses]
+    errs = []
+    for k in range(n):
+        ok = vis[:, k] & ~np.isnan(X[:, 0])
+        pp, _ = proj(K, Ps[k][:, :3], Ps[k][:, 3], X[ok])
+        errs.append(np.median(np.linalg.norm(pp - T[ok, k], axis=1)) if ok.sum() else 99)
+    return K, dist, Ps, X, np.array(errs)
+
+
+
+def sign(K, dist, poses, X, box0, fg0):
+    """The text as a real, upright sign in the solved 3D scene: its base stands at the depth of the scene behind the letters in
+    frame 0 (median of the 3D points there, near pixels excluded), upright = normal of the dominant plane (ground and flat
+    roofs), its frame-0 projection = the 2D box the user placed. Returns the 4 corners (TL, TR, BR, BL) per frame (n, 4, 2)."""
+    good = np.where(~np.isnan(X[:, 0]))[0]
+    Xg = X[good]
+    p0, _ = cv2.projectPoints(Xg, np.zeros(3), np.zeros(3), K, dist)
+    p0 = p0.reshape(-1, 2)
+    b = box0.reshape(4, 2)
+    (x0, y0), (x1, y1) = b.min(0), b.max(0)
+    mx, my = (x1 - x0) * 0.1, (y1 - y0) * 0.5
+    H, W = fg0.shape
+    q = np.clip(p0.round().astype(int), 0, [W - 1, H - 1])
+    near = (p0[:, 0] > x0 - mx) & (p0[:, 0] < x1 + mx) & (p0[:, 1] > y0) & (p0[:, 1] < y1 + my) & (fg0[q[:, 1], q[:, 0]] < 0.3)
+    Z = np.median(Xg[near, 2]) if near.sum() >= 8 else np.median(Xg[:, 2])
+    # dominant roughly-horizontal plane (ground / flat roofs) by RANSAC -> "up". Only normals within 60 deg of the image
+    # vertical count (a far wall facing the camera is not the ground); distance relative to depth (far points are noisier)
+    rng = np.random.default_rng(0)
+    best, up = 0, np.array([0.0, -1.0, 0.0])  # fallback: image-up of frame 0 (sign faces the first frame)
+    for _ in range(600):
+        s = Xg[rng.choice(len(Xg), 3, replace=False)]
+        nrm = np.cross(s[1] - s[0], s[2] - s[0])
+        if np.linalg.norm(nrm) < 1e-12: continue
+        nrm /= np.linalg.norm(nrm)
+        if abs(nrm[1]) < 0.5: continue
+        cnt = (np.abs((Xg - s[0]) @ nrm) < 0.01 * Xg[:, 2]).sum()
+        if cnt > best: best, up = cnt, nrm
+    if best < 0.15 * len(Xg): up = np.array([0.0, -1.0, 0.0])
+    ray = lambda u: Z * np.r_[cv2.undistortPoints(np.float64([[u]]), K, dist).ravel(), 1.0]
+    BL, BR = ray(b[3]), ray(b[2])
+    C = (BL + BR) / 2
+    if (cv2.projectPoints(C + 0.01 * Z * up, np.zeros(3), np.zeros(3), K, dist)[0].ravel()[1] >
+            cv2.projectPoints(C, np.zeros(3), np.zeros(3), K, dist)[0].ravel()[1]): up = -up  # must point up in the image
+    # the base stays exactly where the user put it in frame 0; "up" is made perpendicular to it. A slightly wrong ground
+    # estimate (handheld phone, few ground points) then only leans the sign a little back/forward - it never turns it crooked
+    dh = (BR - BL) / np.linalg.norm(BR - BL)
+    up = up - (up @ dh) * dh; up /= np.linalg.norm(up)
+    q = cv2.undistortPoints(np.float64([[(b[0] + b[1]) / 2]]), K, dist).ravel()[1]  # top edge where the user put it in frame 0
+    h = (q * C[2] - C[1]) / (up[1] - q * up[2])  # solves (C + h up)_y / (C + h up)_z = q
+    corners = np.float64([BL + h * up, BR + h * up, BR, BL])
+    sign.geo = (BL, BR, up)  # for checks: the ground line the sign stands on
+    # pinhole (undistorted) pixels: corners often leave the frame when the camera comes close, and the lens polynomial is
+    # only valid inside it - bake() bends the rendered text with the exact per-pixel lens map instead
+    return np.stack([cv2.projectPoints(corners, rv, tv, K, None)[0].reshape(4, 2) for rv, tv in poses])
+
+
+def _smooth(C, sigma=1.5):
+    """Light temporal smoothing of the corner paths (removes sub-pixel solver jitter, keeps every real move)."""
+    R = C.reshape(len(C), -1).astype(np.float64)
+    if len(R) < 7:
+        return C
+    r = int(3 * sigma)
+    ker = np.exp(-0.5 * (np.arange(-r, r + 1) / sigma) ** 2); ker /= ker.sum()
+    R = np.stack([np.convolve(np.pad(R[:, j], r, mode="reflect", reflect_type="odd"), ker, "valid") for j in range(R.shape[1])], 1)
+    return R.reshape(C.shape)
+
+
+def _pan(T, box):
+    """Fallback for a camera that only turns or stands still (no 3D possible): one homography per frame from the tracks -
+    exact for pure rotation. Direct to frame 0 while enough tracks reach back, else chained from the previous frame."""
+    n = T.shape[1]
+    vis = ~np.isnan(T[..., 0])
+    Hs = [np.eye(3)]
+    for k in range(1, n):
+        c0, c1 = vis[:, 0] & vis[:, k], vis[:, k - 1] & vis[:, k]
+        H = None
+        if c0.sum() >= 50:
+            H, _ = cv2.findHomography(T[c0, 0], T[c0, k], cv2.RANSAC, 1.5)
+        if H is None and c1.sum() >= 8:
+            H, _ = cv2.findHomography(T[c1, k - 1], T[c1, k], cv2.RANSAC, 1.5)
+            H = None if H is None else H @ Hs[-1]
+        Hs.append(H if H is not None else Hs[-1])
+    return np.stack([cv2.perspectiveTransform(box.reshape(-1, 1, 2).astype(np.float64), H).reshape(4, 2) for H in Hs])
+
+
+def place(grays, box0, fg0, log=print):
+    """Tracks + 3D camera solve (frames scaled to <= 1280 px wide) + the sign. Returns (corners per frame in full-size pinhole
+    pixels, K at full size, lens distortion, per-frame solve error or None when the fallback for a non-moving camera ran)."""
+    s = min(1.0, 1280 / grays[0].shape[1])
+    if s < 1:
+        grays = [cv2.resize(g, None, fx=s, fy=s, interpolation=cv2.INTER_AREA) for g in grays]
+        fg0 = cv2.resize(fg0, (grays[0].shape[1], grays[0].shape[0]))
+    H, W = grays[0].shape
+    log("world text: tracking points ...")
+    T = tracks(grays)
+    log(f"world text: 3D camera solve ({T.shape[0]} tracks) ...")
+    try:
+        K, dist, Ps, X, err = solve(T, 0.7 * W, W, H, log=lambda m: log("world text: " + m))
+    except ValueError as e:
+        log(f"{e} -> following the whole image instead (exact when the camera only turns or stands still)")
+        return _smooth(_pan(T, box0 * s)) / s, np.eye(3), np.zeros(5), None
+    poses = [(cv2.Rodrigues(P[:, :3])[0].ravel(), P[:, 3]) for P in Ps]
+    C = _smooth(sign(K, dist, poses, X, box0 * s, fg0)) / s
+    K = K.copy(); K[:2] /= s
+    return C, K, dist, err
 
 
 def bake(src, a, b, text, out, x=0.5, y=0.37, w=0.95, opacity=0.8, font="montserrat", depth=0.22, style="frost", log=print):
@@ -150,42 +402,46 @@ def bake(src, a, b, text, out, x=0.5, y=0.37, w=0.95, opacity=0.8, font="montser
     n = max(1, round((b - a) * fps))
     dsess = fxface._session(fxface.DEPTH_MODEL, fxface.DEPTH_URL, "depth (99 MB)")
     L0, (SW, SH) = layers(text, font, depth)
-    first = fxface._frame(cap, a)
-    if first is None:
+    imgs = []
+    for k in range(n):
+        img = fxface._frame(cap, a) if k == 0 else cap.read()[1]  # sequential reads after the seek: exact frames, fast
+        if img is None:
+            break
+        imgs.append(img)
+    cap.release()
+    if not imgs:
         raise ValueError(f"cannot read {src} at {a}s")
-    FH, FW = first.shape[:2]
+    FH, FW = imgs[0].shape[:2]
+    fgs, T = [], None
+    for k, img in enumerate(imgs):
+        if k % 3 == 0:  # depth every 3rd frame (edges move < 1 px per frame)
+            d = fxface.depth_map(dsess, img)
+            t, _ = cv2.threshold((d * 255).astype(np.uint8), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            T = t / 255 if T is None else 0.8 * T + 0.2 * t / 255
+        fgs.append((np.clip((d - T) / 0.04 + 0.5, 0, 1) * 255).astype(np.uint8))
+        if k % 60 == 0:
+            log(f"world text: depth {k}/{len(imgs)}")
     sw = w * FW / SW
-    place = np.float32([[sw, 0, x * FW - sw * SW / 2], [0, sw, y * FH - sw * SH], [0, 0, 1]])  # bottom centre at (x, y)
-    box0 = cv2.perspectiveTransform(np.float32([[[0, 0]], [[SW, 0]], [[SW, SH]], [[0, SH]]]), place)
-    fgs = []
-
-    def frames():
-        T = d = None
-        for k in range(n):
-            img = first if k == 0 else fxface._frame(cap, a + k / fps)
-            if img is None:
-                return
-            if k % 3 == 0:  # depth every 3rd frame (edges move < 1 px per frame)
-                d = fxface.depth_map(dsess, img)
-                t, _ = cv2.threshold((d * 255).astype(np.uint8), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                T = t / 255 if T is None else 0.8 * T + 0.2 * t / 255
-            fg = np.clip((d - T) / 0.04 + 0.5, 0, 1)
-            fgs.append((fg * 255).astype(np.uint8))
-            yield k, cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), fg
-
-    R = track(frames(), n, box0, FW, FH, log)
-    bake.path, bake.place, bake.box0 = R, place, box0
+    box0 = np.float32([[x * FW - sw * SW / 2, y * FH - sw * SH], [x * FW + sw * SW / 2, y * FH - sw * SH],
+                       [x * FW + sw * SW / 2, y * FH], [x * FW - sw * SW / 2, y * FH]])  # bottom centre at (x, y)
+    C, Kf, dist, err = place([cv2.cvtColor(i, cv2.COLOR_BGR2GRAY) for i in imgs], box0, fgs[0] / 255.0, log)
+    if err is not None:
+        log(f"world text: camera solved, reprojection error mean {err.mean():.2f} px, worst frame {err.max():.2f} px")
+    bake.corners, bake.err, bake.K, bake.dist = C, err, Kf, dist
+    canvas = np.float32([[0, 0], [SW, 0], [SW, SH], [0, SH]])
+    # lens map: for every real (distorted) pixel, where it lies in the pinhole image the text is drawn into
+    grid = np.stack(np.meshgrid(np.arange(FW, dtype=np.float32), np.arange(FH, dtype=np.float32)), -1).reshape(-1, 1, 2)
+    und = cv2.undistortPoints(grid, Kf, dist, P=Kf).reshape(FH, FW, 2)
+    m = int(np.ceil(max(0, -und[..., 0].min(), -und[..., 1].min(), und[..., 0].max() - FW, und[..., 1].max() - FH))) + 2
+    mapx, mapy = und[..., 0] + m, und[..., 1] + m
     with tempfile.TemporaryDirectory() as tmp:
-        for k, p in enumerate(R):
-            img = first if k == 0 else fxface._frame(cap, a + k / fps)
-            if img is None:
-                break
-            H = _M(*p) @ place
-            L = np.dstack([cv2.warpPerspective(L0[..., i], H, (FW, FH), flags=cv2.INTER_LINEAR) for i in range(5)])
+        for k, img in enumerate(imgs):
+            Hk = cv2.getPerspectiveTransform(canvas, (C[k] + m).astype(np.float32))
+            L = np.dstack([cv2.remap(cv2.warpPerspective(L0[..., i], Hk, (FW + 2 * m, FH + 2 * m), flags=cv2.INTER_LINEAR),
+                                     mapx, mapy, cv2.INTER_LINEAR) for i in range(5)])
             cv2.imwrite(f"{tmp}/{k:06d}.png", compose(img, L, fgs[k].astype(np.float32) / 255, opacity, style))
             if k % 60 == 0:
-                log(f"world text: rendering {k}/{len(R)}")
-        cap.release()
+                log(f"world text: rendering {k}/{len(imgs)}")
         clipcut.run([clipcut.FF, "-y", "-framerate", str(fps), "-i", f"{tmp}/%06d.png", "-ss", str(a), "-t", str(b - a), "-i", str(src),
                      "-map", "0:v", "-map", "1:a?", "-c:v", "libx264", "-crf", "16", "-preset", "medium", "-pix_fmt", "yuv420p",
                      "-c:a", "aac", "-b:a", "192k", "-shortest", str(out)])
@@ -224,33 +480,56 @@ def remove(seg):
 
 
 def selftest():
-    """Synthetic camera move: a textured background slides + zooms by a known amount; the tracker must recover it and the
-    pinned text must follow (< 1.5 px error) while a near 'building' band moving much faster is ignored (parallax); the frost
-    style must look milky (scene visible, not opaque white) and occluded letters must leave the image untouched."""
+    """Synthetic drone shot with a known camera (forward + down + turn, lens distortion, 0.2 px tracking noise): ground, a
+    flat-roofed building and far background as 3D points. The camera solve + sign placement must put the sign's corners where
+    the true camera puts them (< 3 px in every frame, sign ~1200 px wide); the frost style must look milky and occluded letters stay untouched."""
     rng = np.random.default_rng(1)
-    tex = cv2.GaussianBlur((rng.random((900, 1600)) * 255).astype(np.uint8), (0, 0), 2)
-    tex = cv2.normalize(tex, None, 0, 255, cv2.NORM_MINMAX)
-    FW, FH, n = 640, 360, 40
-    truth = []
-
-    def frames():
-        for k in range(n):
-            s, tx, ty = 1 + 0.004 * k, -3.0 * k, 1.5 * k
-            A = np.float32([[s, 0, tx], [0, s, ty]])
-            g = cv2.warpAffine(tex, A, (FW, FH), flags=cv2.INTER_LINEAR)
-            near = cv2.warpAffine(tex[::-1].copy(), np.float32([[1, 0, -9 * k], [0, 1, 0]]), (FW, FH))  # building: much faster
-            fg = np.zeros((FH, FW), np.float32); fg[250:] = 1
-            truth.append(A)
-            yield k, np.where(fg > 0.5, near, g).astype(np.uint8), fg
-
-    box0 = np.float32([[[150, 120]], [[450, 120]], [[450, 200]], [[150, 200]]])
-    R = track(frames(), n, box0, FW, FH, log=lambda m: None)
-    err = 0.0
-    for k in (10, 25, n - 1):
-        p_true = cv2.perspectiveTransform(box0, np.vstack([truth[k], [0, 0, 1]]).astype(np.float32))
-        p_est = cv2.perspectiveTransform(box0, _M(*R[k]))
-        err = max(err, float(np.abs(p_true - p_est).max()))
-    assert err < 1.5, f"tracking error {err:.2f} px"
+    W, H, n, f = 1280, 720, 60, 900.0
+    Kt = np.array([[f, 0, W / 2], [0, f, H / 2], [0, 0, 1]]); dt = np.array([-0.05, 0.01, 0, 0, 0])
+    P = np.r_[np.c_[rng.uniform(-30, 30, 1500), np.full(1500, 10.0), rng.uniform(15, 80, 1500)],  # ground (y down = 10)
+              np.c_[rng.uniform(-12, 12, 400), np.full(400, 2.0), rng.uniform(18, 30, 400)],  # roof
+              np.c_[rng.uniform(-60, 60, 300), rng.uniform(-15, 10, 300), np.full(300, 120.0)]]  # far background
+    tilt = cv2.Rodrigues(np.array([0.35, 0.0, 0.0]))[0]  # looking down
+    poses = []
+    for k in range(n):
+        R = cv2.Rodrigues(np.array([0.002 * k, 0.003 * k, 0.0]))[0] @ tilt
+        c = np.array([0.05 * k, 0.03 * k, 0.25 * k])  # camera centre: forward and a bit down/right
+        poses.append((cv2.Rodrigues(R)[0].ravel(), -R @ c))
+    T = np.full((len(P), n, 2), np.nan)
+    for k, (rv, tv) in enumerate(poses):
+        z = (cv2.Rodrigues(rv)[0] @ P.T).T[:, 2] + tv[2]
+        p = cv2.projectPoints(P, rv, tv, Kt, dt)[0].reshape(-1, 2) + rng.normal(0, 0.2, (len(P), 2))
+        ok = (z > 1) & (p[:, 0] >= 0) & (p[:, 0] < W) & (p[:, 1] >= 0) & (p[:, 1] < H)
+        T[ok, k] = p[ok]
+    T = T[(~np.isnan(T[..., 0])).sum(1) >= 2]  # synthetic tracks never vanish and come back, as with LK
+    R0, t0 = cv2.Rodrigues(poses[0][0])[0], poses[0][1]  # truth in frame-0 camera coordinates, like the solve
+    P = (R0 @ P.T).T + t0
+    poses = [(cv2.Rodrigues(cv2.Rodrigues(rv)[0] @ R0.T)[0].ravel(), tv - cv2.Rodrigues(rv)[0] @ R0.T @ t0) for rv, tv in poses]
+    K, dist, Ps, X, e = solve(T, 0.7 * W, W, H, log=lambda m: None)
+    est = [(cv2.Rodrigues(Q[:, :3])[0].ravel(), Q[:, 3]) for Q in Ps]
+    box0 = np.float32([[240, 120], [1040, 120], [1040, 260], [240, 260]])
+    fg0 = np.zeros((H, W))
+    Ct = sign(Kt, dt, poses, P, box0, fg0)
+    Ce = sign(K, dist, est, X, box0, fg0)
+    err = float(np.abs(Ct - Ce).max())
+    assert err < 3.0, f"sign corners off by {err:.2f} px (solve error {e.mean():.2f} px)"
+    # camera that only turns (tripod pan): no 3D solve, the homography fallback must follow exactly
+    rots = [cv2.Rodrigues(np.array([0.0, 0.004 * k, 0.001 * k]))[0] @ tilt for k in range(n)]
+    Tp = np.full((len(P), n, 2), np.nan)
+    for k, R in enumerate(rots):
+        z = (R @ P.T).T[:, 2]
+        p = cv2.projectPoints(P, cv2.Rodrigues(R)[0], np.zeros(3), Kt, None)[0].reshape(-1, 2) + rng.normal(0, 0.2, (len(P), 2))
+        ok = (z > 1) & (p[:, 0] >= 0) & (p[:, 0] < W) & (p[:, 1] >= 0) & (p[:, 1] < H)
+        Tp[ok, k] = p[ok]
+    try:
+        solve(Tp, 0.7 * W, W, H, log=lambda m: None)
+        raise AssertionError("a turning-only camera must not give a 3D solve")
+    except ValueError:
+        pass
+    Cp = _pan(Tp, box0)
+    truth = [cv2.perspectiveTransform(box0.reshape(-1, 1, 2).astype(np.float64), Kt @ R @ rots[0].T @ np.linalg.inv(Kt)).reshape(4, 2) for R in rots]
+    perr = float(np.abs(Cp - np.stack(truth)).max())
+    assert perr < 2.0, f"pan fallback off by {perr:.2f} px"
     L, (W, H) = layers("TEST", px=120)
     assert L.shape[2] == 5 and L[..., 0].max() > 0.9 and L[..., 1].max() > 0.9 and L[..., 3].max() > 0.05, "layers"
     img = np.full((H, W, 3), 60, np.uint8)
@@ -262,7 +541,7 @@ def selftest():
     assert np.abs(o[left].astype(int) - 60).max() <= 1, "occluded letters must not show"
     v = float(o[right].mean())
     assert 140 < v < 245, f"frosted face should be milky, not opaque white or invisible: {v:.0f}"
-    print(f"worldtext selftest ok (tracking error {err:.2f} px, frost face {v:.0f}/255)")
+    print(f"worldtext selftest ok (3D sign corners {err:.2f} px, pan fallback {perr:.2f} px, frost face {v:.0f}/255)")
 
 
 if __name__ == "__main__":

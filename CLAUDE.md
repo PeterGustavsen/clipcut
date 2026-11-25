@@ -40,19 +40,20 @@ Goal: calm, clean, PROFESSIONAL - like a good documentary or an image film, not 
      use it when the user wants a title "behind the school", "standing in the scene", "3D", "like After Effects"):
      `python clipcut.py op worldtext #N "LESSING GYMNASIUM" y=0.37 w=0.95` -> worldtext.py bakes the shot: huge milky,
      slightly transparent frosted-glass letters with a 3D extrusion (upwards: seen from above you see their top faces), a light
-     glass rim and a soft contact shadow, pinned to the scene behind the letters (feature tracking + smoothed camera path), so
-     when the drone/camera moves the text stays where it is, grows and shifts like a real sign; building, people and trees in
-     front cover it (depth). Works best with a moving camera (drone, gimbal, handheld push-in); on a static shot it just stands.
+     glass rim and a soft contact shadow. A real 3D camera tracker (like After Effects) rebuilds the camera path and stands the
+     text as an upright sign in the scene behind the building, so when the drone/camera moves the text stays where it is and
+     changes perspective like a real sign; building, people and trees in front cover it (depth). Best with a moving camera
+     (drone, gimbal, handheld push-in); a camera that only pans/stands gets an exact 2D follow instead (the log says so).
      Placement (fractions of the shot's FIRST frame): `y` = bottom of the letters - put it just behind the building's back edge
      so the building/roof cuts or touches the foot of the letters, never over the people/action the video is about;
      `w` = width (0.8-0.95 = big); `x` = centre. Options: `opacity` 0.8, `depth` 0.22 (extrusion), `style` frost|solid,
      `font` montserrat|playfair|impact. Recipe: `look` the shot, pick y from the first frame (where is the back edge of the
-     building, where are the people), run it (~30 s per second of footage), then LOOK at 4 frames spread over the shot
+     building, where are the people), run it (~50 s per second of footage; the log prints the solve error - mean under 1 px is good), then LOOK at 4 frames spread over the shot
      (`ffmpeg -i media/out.mp4 -vf "select='eq(n,0)+eq(n,80)+eq(n,160)+eq(n,230)',scale=800:-2,tile=2x2" -frames:v 1 -fps_mode passthrough tmp/s.png`):
      the text must not cover faces/people and must read clearly. Re-run with new values any time (it re-bakes from the original
      footage, kept in segment.world.src); `op worldtext #N none` = remove. Cut the shot to its final length BEFORE (the bake
-     covers the shot's in..out). Checked 2026-11-25: Lessing drone push-in (tracker vs SIFT 2-6 px per 40 frames where one
-     layer is behind the letters), Brandenburger Tor handheld with sky (falls back to the whole background).
+     covers the shot's in..out). Checked 2026-11-25: Lessing drone push-in (solve 0.46 px; independent SIFT 3-view check
+     around the text <= 1.7 px over the whole 8 s - the old 2D tracker drifted 20+ px), Brandenburger Tor handheld.
    - music: audio item with `fadeIn` 1, `fadeOut` 2, volume ~0.6 under speech (speech clips keep `volume` 1).
    - interviews / speech: `python clipcut.py` auto captions via the Text tab (faster-whisper) or `/api/transcribe`; set captions to
      `montserrat`, size 0.045, `box: true` or `shadow: true`.

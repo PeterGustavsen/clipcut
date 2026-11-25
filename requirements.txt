@@ -1,5 +1,6 @@
 # ClipCut python deps (plus ffmpeg on PATH)
 numpy
+scipy                    # 3D camera solve for the world text (bundle adjustment)
 opencv-python-headless   # on the PC with the desktop window: opencv-python
 onnxruntime
 librosa
