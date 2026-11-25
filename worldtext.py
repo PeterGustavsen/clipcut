@@ -12,6 +12,7 @@ a 3D extrusion in milky grey, a thin light rim on the top edges and a soft drop 
 extrusion. Result = a new clip `media/<stem>_<a>-<b>_world<tag>.mp4` (source audio kept) that replaces the shot (`op worldtext`).
 
 python worldtext.py SRC A B "TEXT" [--x 0.5] [--y 0.37] [--w 0.95] [--opacity 0.8] [--font montserrat] [--depth 0.22] [--style frost]
+                                  [--until SECONDS --fade 1.5]   (text dissolves and is gone at `until`, then plain footage)
 python worldtext.py selftest
   x, y  = bottom centre of the text in the FIRST frame (fractions of the source frame) - put it just behind the building edge
   w     = text width as a fraction of the frame width in the first frame
@@ -24,8 +25,8 @@ import cv2, numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).parent
-VERSION = "frost-7-3d"  # bump when the look changes, so cached bakes are redone
-SIDE = 0.45  # extrusion brightness (frost): lower = more 3D contrast against the milky face
+VERSION = "frost-8-solid3d"  # bump when the look changes, so cached bakes are redone
+SIDE = 0.58  # extrusion brightness at the back (frost): lower = more 3D contrast against the milky face
 BUNDLED = {"montserrat": "Montserrat-SemiBold.ttf", "playfair": "PlayfairDisplay-Bold.ttf", "impact": "Anton-Regular.ttf"}
 
 
@@ -52,10 +53,11 @@ def layers(text, font="montserrat", depth=0.22, px=360):
 
     face = mask()
     side, shade = np.zeros_like(face), np.zeros_like(face)
-    for k in range(ext, 0, -1):  # extrusion UP and a bit right: from a drone/eye level above you see the letters' top faces
+    ep = max(2, round(px * min(depth, 0.25)))  # painted extrusion stays moderate; the canvas (pad) follows `depth` like sprite()
+    for k in range(ep, 0, -1):  # extrusion UP and a bit right: from a drone/eye level above you see the letters' top faces
         m = mask(k * 0.3, -k)
         side = np.maximum(side, m)
-        shade = np.where(m > 0.5, 1 - k / ext, shade)
+        shade = np.where(m > 0.5, 1 - k / ep, shade)
     side = np.clip(side - face, 0, 1)
     up = np.roll(face, max(1, px // 45), axis=0)  # top edges: face where the face shifted down is empty
     rim = cv2.GaussianBlur(np.clip(face - up, 0, 1), (0, 0), px / 160)
@@ -66,6 +68,78 @@ def layers(text, font="montserrat", depth=0.22, px=360):
     k = 0.04 * W
     P = cv2.getPerspectiveTransform(np.float32([[0, 0], [W, 0], [W, H], [0, H]]), np.float32([[0, 0], [W, 0], [W - k, H], [k, H]]))
     return np.dstack([cv2.warpPerspective(c, P, (W, H), flags=cv2.INTER_LINEAR) for c in stack]), (W, H)
+
+
+def sprite(text, font="montserrat", depth=0.22, px=360):
+    """For the real 3D path: the flat letters (face) and the contact shadow in the SAME canvas as layers() (so placement is
+    identical), plus mip levels (each half size) so the letters are never sampled with gaps when they are small on screen.
+    Returns ([face levels], [shadow levels]), ext/H = extrusion depth as a fraction of the canvas height."""
+    f = _font(font, px)
+    l, t, r, b = f.getbbox(text)
+    ext = max(2, round(px * depth))
+    pad = ext + px // 5
+    W, H = r - l + 2 * pad, b - t + 2 * pad
+
+    def mask(dx=0.0, dy=0.0):
+        m = Image.new("L", (W, H), 0)
+        ImageDraw.Draw(m).text((pad - l + dx, pad - t + dy), text, font=f, fill=255)
+        return np.asarray(m, np.float32) / 255
+
+    face = mask()
+    shadow = cv2.GaussianBlur(mask(0, px * 0.06), (0, 0), px / 10)
+    fp, sp = [face], [shadow]
+    while min(fp[-1].shape) > 64:
+        fp.append(cv2.pyrDown(fp[-1])); sp.append(cv2.pyrDown(sp[-1]))
+    return (fp, sp), ext / H
+
+
+def _sample(pyr, Hc, ux, uy, size):
+    """Letters from the canvas mip level that fits the on-screen size, sampled ONCE straight into the output pixels
+    (ux, uy = their undistorted coordinates) - no second resampling for the lens."""
+    W, H = size
+    q = np.float32([[0, 0], [W, 0], [W, H], [0, H]])
+    s = cv2.perspectiveTransform(q[None], Hc)[0]
+    scale = min(np.linalg.norm(s[1] - s[0]) / W, np.linalg.norm(s[2] - s[1]) / H, np.linalg.norm(s[3] - s[2]) / W)
+    lv = int(np.clip(np.floor(np.log2(1 / max(scale, 1e-6))), 0, len(pyr) - 1))
+    D = np.diag([2.0 ** lv, 2.0 ** lv, 1.0])
+    Hi = np.linalg.inv(Hc @ D)
+    zx = Hi[0, 0] * ux + Hi[0, 1] * uy + Hi[0, 2]
+    zy = Hi[1, 0] * ux + Hi[1, 1] * uy + Hi[1, 2]
+    zw = Hi[2, 0] * ux + Hi[2, 1] * uy + Hi[2, 2]
+    return cv2.remap(pyr[lv], (zx / zw).astype(np.float32), (zy / zw).astype(np.float32), cv2.INTER_LINEAR,
+                     borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+
+def render3d(spr, size, front, back, und):
+    """True 3D extruded letters: the face at the sign plane plus slices every ~1 px back to `back` (the sign moved back along
+    its normal by the extrusion depth), so the sides are exactly what this camera would see - from above the tops, from the
+    side the flanks. Returns the 5 layers of compose() in output pixels: face, side, shade (1 = front edge, 0 = back),
+    rim (crisp glass edges), shadow."""
+    (fp, sp), (W, H) = spr, size
+    FH, FW = und.shape[:2]
+    canvas = np.float32([[0, 0], [W, 0], [W, H], [0, H]])
+    allq = np.r_[front, back]
+    x0, y0 = np.floor(allq.min(0)).astype(int) - 60
+    x1, y1 = np.ceil(allq.max(0)).astype(int) + 60
+    x0, y0, x1, y1 = max(x0, 0), max(y0, 0), min(x1, FW), min(y1, FH)
+    L = np.zeros((FH, FW, 5), np.float32)
+    if x1 <= x0 or y1 <= y0:
+        return L
+    ux, uy = und[y0:y1, x0:x1, 0], und[y0:y1, x0:x1, 1]
+    Hf = lambda t: cv2.getPerspectiveTransform(canvas, (front + t * (back - front)).astype(np.float32)).astype(np.float64)
+    face = _sample(fp, Hf(0), ux, uy, (W, H))
+    n = int(np.clip(np.ceil(np.abs(back - front).max() * 1.2), 1, 64))
+    side = np.zeros_like(face); dep = np.ones_like(face)
+    for j in range(n, 0, -1):  # back to front: the frontmost slice decides the depth seen at a pixel
+        m = _sample(fp, Hf(j / n), ux, uy, (W, H))
+        side = np.maximum(side, m)
+        dep = np.where(m > 0.5, j / n, dep)
+    side = np.clip(side - face, 0, 1)
+    k3 = np.ones((3, 3), np.uint8)
+    sil = np.maximum(face, side)
+    rim = np.maximum(np.clip(face - cv2.erode(face, k3), 0, 1), 0.5 * np.clip(sil - cv2.erode(sil, k3), 0, 1))
+    L[y0:y1, x0:x1] = np.dstack([face, side, 1 - dep, rim, _sample(sp, Hf(0), ux, uy, (W, H))])
+    return L
 
 
 def compose(img, L, fg, opacity=0.8, style="frost"):
@@ -79,7 +153,7 @@ def compose(img, L, fg, opacity=0.8, style="frost"):
         face_col = 0.97
     else:  # frosted glass: the scene behind the letter, blurred and lifted towards milky white
         blur = cv2.GaussianBlur(x, (0, 0), max(2.0, img.shape[0] / 90))
-        side_col = blur * 0.35 + (SIDE + 0.3 * shade) * 0.65  # top faces catch the light, deeper parts darker
+        side_col = blur * 0.12 + (SIDE + 0.22 * shade) * 0.88  # clean milky glass, a bit darker towards the back
         face_col = blur * 0.3 + 0.7
     x = x * (1 - side * vis) + side_col * side * vis
     x = x * (1 - face * vis) + face_col * face * vis
@@ -298,10 +372,11 @@ def solve(T, f, W, H, log=print, step=3):
 
 
 
-def sign(K, dist, poses, X, box0, fg0):
+def sign(K, dist, poses, X, box0, fg0, back=0.0):
     """The text as a real, upright sign in the solved 3D scene: its base stands at the depth of the scene behind the letters in
     frame 0 (median of the 3D points there, near pixels excluded), upright = normal of the dominant plane (ground and flat
-    roofs), its frame-0 projection = the 2D box the user placed. Returns the 4 corners (TL, TR, BR, BL) per frame (n, 4, 2)."""
+    roofs), its frame-0 projection = the 2D box the user placed. Returns the 4 corners (TL, TR, BR, BL) per frame (n, 4, 2);
+    with back > 0 also the 4 corners of the same sign moved back (away from the camera) by back x its height: (n, 8, 2)."""
     good = np.where(~np.isnan(X[:, 0]))[0]
     Xg = X[good]
     p0, _ = cv2.projectPoints(Xg, np.zeros(3), np.zeros(3), K, dist)
@@ -339,9 +414,12 @@ def sign(K, dist, poses, X, box0, fg0):
     h = (q * C[2] - C[1]) / (up[1] - q * up[2])  # solves (C + h up)_y / (C + h up)_z = q
     corners = np.float64([BL + h * up, BR + h * up, BR, BL])
     sign.geo = (BL, BR, up)  # for checks: the ground line the sign stands on
+    if back > 0:
+        nb = np.cross(dh, up); nb *= np.sign(nb @ C) or 1.0  # sign normal, pointing away from the first camera
+        corners = np.r_[corners, corners + back * abs(h) * nb]
     # pinhole (undistorted) pixels: corners often leave the frame when the camera comes close, and the lens polynomial is
     # only valid inside it - bake() bends the rendered text with the exact per-pixel lens map instead
-    return np.stack([cv2.projectPoints(corners, rv, tv, K, None)[0].reshape(4, 2) for rv, tv in poses])
+    return np.stack([cv2.projectPoints(corners, rv, tv, K, None)[0].reshape(-1, 2) for rv, tv in poses])
 
 
 def _smooth(C, sigma=1.5):
@@ -373,7 +451,7 @@ def _pan(T, box):
     return np.stack([cv2.perspectiveTransform(box.reshape(-1, 1, 2).astype(np.float64), H).reshape(4, 2) for H in Hs])
 
 
-def place(grays, box0, fg0, log=print):
+def place(grays, box0, fg0, log=print, back=0.0):
     """Tracks + 3D camera solve (frames scaled to <= 1280 px wide) + the sign. Returns (corners per frame in full-size pinhole
     pixels, K at full size, lens distortion, per-frame solve error or None when the fallback for a non-moving camera ran)."""
     s = min(1.0, 1280 / grays[0].shape[1])
@@ -390,25 +468,29 @@ def place(grays, box0, fg0, log=print):
         log(f"{e} -> following the whole image instead (exact when the camera only turns or stands still)")
         return _smooth(_pan(T, box0 * s)) / s, np.eye(3), np.zeros(5), None
     poses = [(cv2.Rodrigues(P[:, :3])[0].ravel(), P[:, 3]) for P in Ps]
-    C = _smooth(sign(K, dist, poses, X, box0 * s, fg0)) / s
+    C = _smooth(sign(K, dist, poses, X, box0 * s, fg0, back)) / s
     K = K.copy(); K[:2] /= s
     return C, K, dist, err
 
 
-def bake(src, a, b, text, out, x=0.5, y=0.37, w=0.95, opacity=0.8, font="montserrat", depth=0.22, style="frost", log=print):
+def bake(src, a, b, text, out, x=0.5, y=0.37, w=0.95, opacity=0.8, font="montserrat", depth=0.4, style="frost", until=None,
+         fade=1.5, log=print):
+    """until = seconds into the shot when the text is gone (it dissolves - fades and softens - over `fade` seconds before);
+    after that the footage runs on untouched and is neither tracked nor solved (fast, and the camera may do anything)."""
     import clipcut, fxface
     cap = cv2.VideoCapture(str(src))
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
-    n = max(1, round((b - a) * fps))
+    n_all = max(1, round((b - a) * fps))
+    n = n_all if until is None else max(2, min(n_all, int(np.ceil(float(until) * fps)) + 1))
     dsess = fxface._session(fxface.DEPTH_MODEL, fxface.DEPTH_URL, "depth (99 MB)")
-    L0, (SW, SH) = layers(text, font, depth)
+    spr, back = sprite(text, font, depth)  # real 3D letters (needs the 3D solve)
+    SH, SW = spr[0][0].shape
     imgs = []
     for k in range(n):
         img = fxface._frame(cap, a) if k == 0 else cap.read()[1]  # sequential reads after the seek: exact frames, fast
         if img is None:
             break
         imgs.append(img)
-    cap.release()
     if not imgs:
         raise ValueError(f"cannot read {src} at {a}s")
     FH, FW = imgs[0].shape[:2]
@@ -424,7 +506,8 @@ def bake(src, a, b, text, out, x=0.5, y=0.37, w=0.95, opacity=0.8, font="montser
     sw = w * FW / SW
     box0 = np.float32([[x * FW - sw * SW / 2, y * FH - sw * SH], [x * FW + sw * SW / 2, y * FH - sw * SH],
                        [x * FW + sw * SW / 2, y * FH], [x * FW - sw * SW / 2, y * FH]])  # bottom centre at (x, y)
-    C, Kf, dist, err = place([cv2.cvtColor(i, cv2.COLOR_BGR2GRAY) for i in imgs], box0, fgs[0] / 255.0, log)
+    C, Kf, dist, err = place([cv2.cvtColor(i, cv2.COLOR_BGR2GRAY) for i in imgs], box0, fgs[0] / 255.0, log, back)
+    L0 = None if C.shape[1] == 8 else layers(text, font, depth)[0]  # no 3D solve: painted extrusion (same canvas)
     if err is not None:
         log(f"world text: camera solved, reprojection error mean {err.mean():.2f} px, worst frame {err.max():.2f} px")
     bake.corners, bake.err, bake.K, bake.dist = C, err, Kf, dist
@@ -436,19 +519,36 @@ def bake(src, a, b, text, out, x=0.5, y=0.37, w=0.95, opacity=0.8, font="montser
     mapx, mapy = und[..., 0] + m, und[..., 1] + m
     with tempfile.TemporaryDirectory() as tmp:
         for k, img in enumerate(imgs):
-            Hk = cv2.getPerspectiveTransform(canvas, (C[k] + m).astype(np.float32))
-            L = np.dstack([cv2.remap(cv2.warpPerspective(L0[..., i], Hk, (FW + 2 * m, FH + 2 * m), flags=cv2.INTER_LINEAR),
-                                     mapx, mapy, cv2.INTER_LINEAR) for i in range(5)])
+            if L0 is None:
+                L = render3d(spr, (SW, SH), C[k, :4], C[k, 4:], und)
+            else:
+                Hk = cv2.getPerspectiveTransform(canvas, (C[k] + m).astype(np.float32))
+                L = np.dstack([cv2.remap(cv2.warpPerspective(L0[..., i], Hk, (FW + 2 * m, FH + 2 * m), flags=cv2.INTER_LINEAR),
+                                         mapx, mapy, cv2.INTER_LINEAR) for i in range(5)])
+            if until is not None:  # dissolve: fade + soften towards `until`
+                t = k / fps
+                al = float(np.clip((float(until) - t) / max(float(fade), 1e-3), 0, 1))
+                al = al * al * (3 - 2 * al)  # smoothstep
+                if al < 1:
+                    sig = (1 - al) * FH / 120
+                    L = cv2.GaussianBlur(L, (0, 0), sig).reshape(L.shape) * al if sig > 0.3 else L * al
             cv2.imwrite(f"{tmp}/{k:06d}.png", compose(img, L, fgs[k].astype(np.float32) / 255, opacity, style))
             if k % 60 == 0:
                 log(f"world text: rendering {k}/{len(imgs)}")
+        imgs.clear()
+        for k in range(n, n_all):  # after the text is gone: the footage as it is
+            ok, img = cap.read()
+            if not ok:
+                break
+            cv2.imwrite(f"{tmp}/{k:06d}.png", img)
+        cap.release()
         clipcut.run([clipcut.FF, "-y", "-framerate", str(fps), "-i", f"{tmp}/%06d.png", "-ss", str(a), "-t", str(b - a), "-i", str(src),
                      "-map", "0:v", "-map", "1:a?", "-c:v", "libx264", "-crf", "16", "-preset", "medium", "-pix_fmt", "yuv420p",
                      "-c:a", "aac", "-b:a", "192k", "-shortest", str(out)])
     return out
 
 
-KEYS = ("x", "y", "w", "opacity", "font", "depth", "style")
+KEYS = ("x", "y", "w", "opacity", "font", "depth", "style", "until", "fade")
 
 
 def apply(seg, media_dir, spec, log=print):
@@ -530,6 +630,16 @@ def selftest():
     truth = [cv2.perspectiveTransform(box0.reshape(-1, 1, 2).astype(np.float64), Kt @ R @ rots[0].T @ np.linalg.inv(Kt)).reshape(4, 2) for R in rots]
     perr = float(np.abs(Cp - np.stack(truth)).max())
     assert perr < 2.0, f"pan fallback off by {perr:.2f} px"
+    # real 3D extrusion: back face 20 px higher on screen (seen from above) -> sides above the letters, none below, crisp face
+    (fp, sp), bk = sprite("TEST", px=120)
+    sh, sw_ = fp[0].shape
+    fr_q = np.float32([[100, 100], [100 + sw_, 100], [100 + sw_, 100 + sh], [100, 100 + sh]])
+    gx, gy = np.meshgrid(np.arange(800, dtype=np.float32), np.arange(400, dtype=np.float32))
+    L3 = render3d(((fp, sp)), (sw_, sh), fr_q, fr_q - [0, 20], np.dstack([gx, gy]))
+    col = L3[..., 1].sum(1)
+    top, bot = np.nonzero(L3[..., 0].sum(1) > 0)[0][[0, -1]]
+    assert col[top - 15:top].sum() > 50 and col[bot + 3:].sum() < 1, "3D sides must show above the letters only"
+    assert L3[..., 0].max() > 0.99 and np.isin(np.round(L3[..., 0][L3[..., 0] > 0], 1), [1.0]).mean() > 0.6, "face not crisp"
     L, (W, H) = layers("TEST", px=120)
     assert L.shape[2] == 5 and L[..., 0].max() > 0.9 and L[..., 1].max() > 0.9 and L[..., 3].max() > 0.05, "layers"
     img = np.full((H, W, 3), 60, np.uint8)
@@ -552,9 +662,11 @@ if __name__ == "__main__":
     ap.add_argument("src"); ap.add_argument("a", type=float); ap.add_argument("b", type=float); ap.add_argument("text")
     ap.add_argument("--out"); ap.add_argument("--x", type=float, default=0.5); ap.add_argument("--y", type=float, default=0.37)
     ap.add_argument("--w", type=float, default=0.95); ap.add_argument("--opacity", type=float, default=0.8)
-    ap.add_argument("--font", default="montserrat"); ap.add_argument("--depth", type=float, default=0.22)
+    ap.add_argument("--font", default="montserrat"); ap.add_argument("--depth", type=float, default=0.4)
     ap.add_argument("--style", default="frost", choices=["frost", "solid"])
+    ap.add_argument("--until", type=float, help="seconds into the shot when the text has dissolved (then plain footage)")
+    ap.add_argument("--fade", type=float, default=1.5, help="dissolve duration in seconds")
     o = ap.parse_args()
     src = Path(o.src)
     out = o.out or str(src.with_name(f"{src.stem}_{o.a:.2f}-{o.b:.2f}_world.mp4"))
-    print(bake(src, o.a, o.b, o.text, out, o.x, o.y, o.w, o.opacity, o.font, o.depth, o.style))
+    print(bake(src, o.a, o.b, o.text, out, o.x, o.y, o.w, o.opacity, o.font, o.depth, o.style, o.until, o.fade))
