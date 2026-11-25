@@ -23,15 +23,35 @@ SKY_MODEL = Path(getattr(sys, "_MEIPASS", Path(__file__).parent)) / "models" / "
 SKY_URL = "https://huggingface.co/JianyuanWang/skyseg/resolve/main/skyseg.onnx"
 
 
-def _sky_session():
+# no sky in the shot (drone from above, street level without horizon): monocular depth instead (Depth Anything V2 small, 99 MB).
+# The building in front is nearer than what is behind it; the near/far split is Otsu on the frame's depth (2026-11-25, Lessing drone shot).
+DEPTH_MODEL = SKY_MODEL.parent / "depth_small.onnx"
+DEPTH_URL = "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model.onnx"
+
+
+def _session(path, url, what):
     import onnxruntime as ort, urllib.request
-    if not SKY_MODEL.exists():
-        print("downloading the sky model (176 MB, once) ...", file=sys.stderr)
-        SKY_MODEL.parent.mkdir(exist_ok=True)
-        tmp = SKY_MODEL.with_suffix(".part")
-        urllib.request.urlretrieve(SKY_URL, tmp)
-        tmp.replace(SKY_MODEL)
-    return ort.InferenceSession(str(SKY_MODEL), providers=["CPUExecutionProvider"])
+    if not path.exists():
+        print(f"downloading the {what} model (once) ...", file=sys.stderr)
+        path.parent.mkdir(exist_ok=True)
+        tmp = path.with_suffix(".part")
+        urllib.request.urlretrieve(url, tmp)
+        tmp.replace(path)
+    return ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+
+
+def _sky_session():
+    return _session(SKY_MODEL, SKY_URL, "sky (176 MB)")
+
+
+def depth_map(sess, img):
+    """Relative nearness 0..1 (1 = nearest) at the frame's size."""
+    h, w = img.shape[:2]
+    H, W = 518, max(14, round(518 * w / h / 14) * 14)
+    x = cv2.cvtColor(cv2.resize(img, (W, H), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2RGB).astype(np.float32) / 255
+    x = ((x - (0.485, 0.456, 0.406)) / (0.229, 0.224, 0.225)).transpose(2, 0, 1)[None].astype(np.float32)
+    d = cv2.resize(sess.run(None, {sess.get_inputs()[0].name: x})[0][0], (w, h), interpolation=cv2.INTER_CUBIC)
+    return (d - d.min()) / (d.max() - d.min() + 1e-6)
 
 
 def sky_alpha(sess, img):
@@ -197,15 +217,27 @@ def cutout(src, a, b, fps, out, kind="person"):
 
 
 def _sky_cutout(src, a, b, fps, out):
+    """Building cut-out (everything in front of the background): sky segmentation when the shot has sky (>= 4 % of the first frame), else the depth split."""
     import clipcut
-    sess, prev = _sky_session(), None
+    sky, prev, T = _sky_session(), None, None
     cap = cv2.VideoCapture(str(src))
+    first = _frame(cap, a)
+    use_depth = first is not None and float((sky_alpha(sky, first) < 0.5).mean()) < 0.04
+    sess = _session(DEPTH_MODEL, DEPTH_URL, "depth (99 MB)") if use_depth else sky
+    print(f"building cut-out via {'depth' if use_depth else 'sky'}", file=sys.stderr)
     with tempfile.TemporaryDirectory() as tmp:
         for k in range(max(1, round((b - a) * fps))):
             img = _frame(cap, a + k / fps)
             if img is None:
                 break
-            al = sky_alpha(sess, img)
+            if use_depth:
+                if k % 3 == 0:  # ponytail: depth every 3rd frame - a drone/handheld edge moves < 1 px per frame; per frame if edges lag
+                    d = depth_map(sess, img)
+                t, _ = cv2.threshold((d * 255).astype(np.uint8), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                T = t / 255 if T is None else 0.8 * T + 0.2 * t / 255  # smooth the split point over time (no pumping edge)
+                al = np.clip((d - T) / 0.04 + 0.5, 0, 1)
+            else:
+                al = sky_alpha(sess, img)
             prev = al if prev is None or prev.shape != al.shape else 0.6 * al + 0.4 * prev  # ponytail: light temporal smoothing against edge flicker
             cv2.imwrite(f"{tmp}/{k:06d}.png", np.dstack([img, (prev * 255).astype(np.uint8)]))
         cap.release()

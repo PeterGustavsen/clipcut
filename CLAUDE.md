@@ -16,8 +16,9 @@ Goal: calm, clean, PROFESSIONAL - like a good documentary or an image film, not 
    - transitions: mostly hard cuts, plus `dissolve` / `fade` 0.4-0.8 s between topics, `fadeblack` 0.8 s at the start/end.
      Avoid flashes (`fadewhite`), shake, zoom punches, glitch and laser eyes unless asked.
    - slow push-in feels cinematic: segment `zoom: 1.0, zoomTo: 1.08`.
-   - a look for the whole video (`filter` at project level): `kino` (cinematic, default), `film_warm`, `teal_orange`, `clean`,
-     `soft`, `doku_bw` (black & white). Keep skin natural, never `phonk`/`noir`/`grunge` for school videos.
+   - a look for the whole video (`filter` at project level): `clean` (bright sunny/outdoor/drone footage - kino makes it murky),
+     `kino` (cinematic, darker, for indoor/evening/interviews), `film_warm`, `teal_orange`, `soft`, `doku_bw` (black & white).
+     Render one frame with the look and LOOK at it before committing to it. Keep skin natural, never `phonk`/`noir`/`grunge` for school videos.
    - text: font `montserrat` (modern) or `playfair` (elegant serif) - these have no meme outline; `opacity` 0.8-0.9, `shadow: true`,
      `anim_in`/`anim_out` `fade` 0.4-0.6 s. Title size 0.08-0.13, lower third 0.035-0.045 at y 0.85. Keep text inside the frame
      (long words at size > 0.12 overflow a 9:16 canvas).
@@ -25,9 +26,15 @@ Goal: calm, clean, PROFESSIONAL - like a good documentary or an image film, not 
      `python clipcut.py op behind <textid>` -> RVM cuts out the person in every shot under the text and puts the cut-out on top.
      Place the text so the person's head/shoulders overlap part of it (e.g. y 0.35-0.45).
    - **text behind a building** (or tower, skyline, trees): `behind: "building"` / `python clipcut.py op behind <textid> building`
-     -> sky segmentation (models/skyseg.onnx, 176 MB, downloaded automatically on first use): everything that is NOT sky stands in
-     front of the text. Needs sky in the shot. Put the text IN the sky so that the top of the building (roof, tower, statue) cuts
-     into the lower part of the letters - LOOK at a frame first (`look`) to find where the skyline is, then check a rendered frame.
+     -> with sky in the shot (>= 4 % of the first frame): sky segmentation (models/skyseg.onnx, 176 MB), everything that is NOT sky
+     stands in front; put the text IN the sky so the roof/tower/statue cuts into the lower part of the letters.
+     Without sky (drone from above, street level): depth (models/depth_small.onnx = Depth Anything V2 small, 99 MB), near/far split
+     by Otsu per frame - the building in front covers the text, what lies behind it shows it. Put the text just BEHIND the roof edge
+     (in the yard/street/houses behind the building). With a drone flying towards the building the roof edge moves down the frame,
+     so a text placed just below the first frame's roof edge is a reveal: it rises out from behind the roof (Lessing drone test
+     2026-11-25: 1920x1080, text y 0.43 size 0.1, edge at y ~0.37 -> ~0.57). Keep it off people you want to show (crowds in a yard).
+     Both models download once automatically. Cost: ~25 s per second of footage on a laptop CPU (depth every 3rd frame) - tell the
+     user it takes a few minutes. LOOK at a frame first (`look`) to find the edge, then check rendered frames.
      After moving/retiming the text or changing the shots under it, run `op behind` again (cut-outs are cached in media/).
    - music: audio item with `fadeIn` 1, `fadeOut` 2, volume ~0.6 under speech (speech clips keep `volume` 1).
    - interviews / speech: `python clipcut.py` auto captions via the Text tab (faster-whisper) or `/api/transcribe`; set captions to

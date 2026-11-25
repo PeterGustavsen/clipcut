@@ -16,3 +16,4 @@ face_ref.json
 _star_faces.png
 models/skyseg.onnx
 models/*.part
+models/depth_small.onnx
