@@ -1,0 +1,10 @@
+# ClipCut python deps (plus ffmpeg on PATH)
+numpy
+opencv-python-headless   # on the PC with the desktop window: opencv-python
+onnxruntime
+librosa
+soundfile
+faster-whisper
+yt-dlp
+Pillow
+pywebview                # only for the desktop app (app.py)

@@ -1,0 +1,16 @@
+__pycache__/
+media/
+tmp/
+chat.jsonl
+transcripts/
+*.log
+chat_logs/
+dist/
+build/
+# secrets - never commit
+*.env
+!*.env.example
+.venv/
+.DS_Store
+face_ref.json
+_star_faces.png
