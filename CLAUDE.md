@@ -6,6 +6,11 @@ ClipCut is a CapCut-style video editor that Claude Code drives. Typical users he
 flashes what changed, jumps the playhead there and shows the last `agent.jsonl` message as a 🤖 banner.
 Media lives in `media/` and is referenced by basename only. Runs on macOS (`start.command`) and Windows (`start.bat`), all local.
 
+**FIRST, on a Mac:** every `python ...` in this file means `.venv/bin/python ...` (macOS has no `python`; the packages live in
+`.venv`). No `.venv` yet -> `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt` (or the user double-clicks
+`start.command` once), `brew install ffmpeg` if `ffmpeg` is missing. Then check once: `.venv/bin/python clipcut.py rendertest`.
+The editor window (live preview) = `start.command`; you can edit while it is open.
+
 ## How to make a school video (the default unless the user asks for something else)
 Goal: calm, clean, PROFESSIONAL - like a good documentary or an image film, not a TikTok meme edit.
 1. LOOK at the footage first: `python clipcut.py look media/x.mp4 --n 12` for every clip (contact sheet image -> read it). Note what
