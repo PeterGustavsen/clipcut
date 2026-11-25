@@ -37,20 +37,48 @@ def _font(font, px):
     return ImageFont.load_default(px)
 
 
-def layers(text, font="montserrat", depth=0.22, px=360):
-    """Float32 masks in sprite space: face, side (extrusion), shade (side darkness 0..1), rim (light top edges), shadow.
-    A mild perspective is baked in (bottom 8 % narrower: seen from above, the top of a standing sign is nearer)."""
+def _art(text, font="montserrat", depth=0.22, px=360, stars=False):
+    """The sign's canvas: (W, H, ext, mask(dx, dy) -> letters (+ stars) float mask, star_mask or None). stars = the ring of
+    12 golden five-pointed stars of the European flag around the text (the text sits in the middle, like the flag)."""
     f = _font(font, px)
-    l, t, r, b = f.getbbox(text)
+    l, t, r, b = f.getbbox(text) if text.strip() else (0, 0, 1, 1)
     ext = max(2, round(px * depth))
     pad = ext + px // 5
-    W, H = r - l + 2 * pad, b - t + 2 * pad
+    tw, th = r - l, b - t
+    sr = px * 0.42  # star radius
+    if not stars:
+        W, H = tw + 2 * pad, th + 2 * pad
+        ox, oy = pad - l, pad - t
+        ring = None
+    else:
+        R = max(tw * 0.5 * 1.18 + sr, px * 1.6)
+        W = H = int(2 * (R + sr) + 2 * pad)
+        ox, oy = W / 2 - tw / 2 - l, H / 2 - th / 2 - t
+        ring = [(W / 2 + R * np.cos(-np.pi / 2 + k * np.pi / 6), H / 2 + R * np.sin(-np.pi / 2 + k * np.pi / 6)) for k in range(12)]
+
+    def star_mask(dx=0.0, dy=0.0):
+        m = Image.new("L", (W, H), 0)
+        d = ImageDraw.Draw(m)
+        for cx, cy in ring:
+            pts = [(cx + dx + (sr if k % 2 == 0 else sr * 0.382) * np.cos(-np.pi / 2 + k * np.pi / 5),
+                    cy + dy + (sr if k % 2 == 0 else sr * 0.382) * np.sin(-np.pi / 2 + k * np.pi / 5)) for k in range(10)]
+            d.polygon(pts, fill=255)
+        return np.asarray(m, np.float32) / 255
 
     def mask(dx=0.0, dy=0.0):
         m = Image.new("L", (W, H), 0)
-        ImageDraw.Draw(m).text((pad - l + dx, pad - t + dy), text, font=f, fill=255)
-        return np.asarray(m, np.float32) / 255
+        if text.strip():
+            ImageDraw.Draw(m).text((ox + dx, oy + dy), text, font=f, fill=255)
+        m = np.asarray(m, np.float32) / 255
+        return np.maximum(m, star_mask(dx, dy)) if ring else m
 
+    return W, H, ext, mask, (star_mask if ring else None)
+
+
+def layers(text, font="montserrat", depth=0.22, px=360, stars=False):
+    """Float32 masks in sprite space: face, side (extrusion), shade (side darkness 0..1), rim (light top edges), shadow.
+    A mild perspective is baked in (bottom 8 % narrower: seen from above, the top of a standing sign is nearer)."""
+    W, H, ext, mask, _ = _art(text, font, depth, px, stars)
     face = mask()
     side, shade = np.zeros_like(face), np.zeros_like(face)
     ep = max(2, round(px * min(depth, 0.25)))  # painted extrusion stays moderate; the canvas (pad) follows `depth` like sprite()
@@ -70,27 +98,20 @@ def layers(text, font="montserrat", depth=0.22, px=360):
     return np.dstack([cv2.warpPerspective(c, P, (W, H), flags=cv2.INTER_LINEAR) for c in stack]), (W, H)
 
 
-def sprite(text, font="montserrat", depth=0.22, px=360):
+def sprite(text, font="montserrat", depth=0.22, px=360, stars=False):
     """For the real 3D path: the flat letters (face) and the contact shadow in the SAME canvas as layers() (so placement is
     identical), plus mip levels (each half size) so the letters are never sampled with gaps when they are small on screen.
-    Returns ([face levels], [shadow levels]), ext/H = extrusion depth as a fraction of the canvas height."""
-    f = _font(font, px)
-    l, t, r, b = f.getbbox(text)
-    ext = max(2, round(px * depth))
-    pad = ext + px // 5
-    W, H = r - l + 2 * pad, b - t + 2 * pad
-
-    def mask(dx=0.0, dy=0.0):
-        m = Image.new("L", (W, H), 0)
-        ImageDraw.Draw(m).text((pad - l + dx, pad - t + dy), text, font=f, fill=255)
-        return np.asarray(m, np.float32) / 255
-
+    Returns ([face levels], [shadow levels], [gold star levels] | None), ext/H = extrusion depth / canvas height."""
+    W, H, ext, mask, star_mask = _art(text, font, depth, px, stars)
     face = mask()
     shadow = cv2.GaussianBlur(mask(0, px * 0.06), (0, 0), px / 10)
-    fp, sp = [face], [shadow]
+    gold = star_mask() if star_mask else None
+    fp, sp, gp = [face], [shadow], ([gold] if gold is not None else None)
     while min(fp[-1].shape) > 64:
         fp.append(cv2.pyrDown(fp[-1])); sp.append(cv2.pyrDown(sp[-1]))
-    return (fp, sp), ext / H
+        if gp:
+            gp.append(cv2.pyrDown(gp[-1]))
+    return (fp, sp, gp), ext / H
 
 
 def _sample(pyr, Hc, ux, uy, size):
@@ -115,30 +136,33 @@ def render3d(spr, size, front, back, und):
     its normal by the extrusion depth), so the sides are exactly what this camera would see - from above the tops, from the
     side the flanks. Returns the 5 layers of compose() in output pixels: face, side, shade (1 = front edge, 0 = back),
     rim (crisp glass edges), shadow."""
-    (fp, sp), (W, H) = spr, size
+    (fp, sp, gp), (W, H) = (spr if len(spr) == 3 else (*spr, None)), size
     FH, FW = und.shape[:2]
     canvas = np.float32([[0, 0], [W, 0], [W, H], [0, H]])
     allq = np.r_[front, back]
     x0, y0 = np.floor(allq.min(0)).astype(int) - 60
     x1, y1 = np.ceil(allq.max(0)).astype(int) + 60
     x0, y0, x1, y1 = max(x0, 0), max(y0, 0), min(x1, FW), min(y1, FH)
-    L = np.zeros((FH, FW, 5), np.float32)
+    L = np.zeros((FH, FW, 6), np.float32)
     if x1 <= x0 or y1 <= y0:
         return L
     ux, uy = und[y0:y1, x0:x1, 0], und[y0:y1, x0:x1, 1]
     Hf = lambda t: cv2.getPerspectiveTransform(canvas, (front + t * (back - front)).astype(np.float32)).astype(np.float64)
     face = _sample(fp, Hf(0), ux, uy, (W, H))
     n = int(np.clip(np.ceil(np.abs(back - front).max() * 1.2), 1, 64))
-    side = np.zeros_like(face); dep = np.ones_like(face)
+    side = np.zeros_like(face); dep = np.ones_like(face); gs = np.zeros_like(face)
     for j in range(n, 0, -1):  # back to front: the frontmost slice decides the depth seen at a pixel
         m = _sample(fp, Hf(j / n), ux, uy, (W, H))
         side = np.maximum(side, m)
         dep = np.where(m > 0.5, j / n, dep)
+        if gp:
+            gs = np.where(m > 0.5, _sample(gp, Hf(j / n), ux, uy, (W, H)), gs)
     side = np.clip(side - face, 0, 1)
     k3 = np.ones((3, 3), np.uint8)
     sil = np.maximum(face, side)
     rim = np.maximum(np.clip(face - cv2.erode(face, k3), 0, 1), 0.5 * np.clip(sil - cv2.erode(sil, k3), 0, 1))
-    L[y0:y1, x0:x1] = np.dstack([face, side, 1 - dep, rim, _sample(sp, Hf(0), ux, uy, (W, H))])
+    gold = np.where(face > 0.5, _sample(gp, Hf(0), ux, uy, (W, H)), gs) if gp else np.zeros_like(face)  # star parts
+    L[y0:y1, x0:x1] = np.dstack([face, side, 1 - dep, rim, _sample(sp, Hf(0), ux, uy, (W, H)), gold])
     return L
 
 
@@ -155,6 +179,12 @@ def compose(img, L, fg, opacity=0.8, style="frost"):
         blur = cv2.GaussianBlur(x, (0, 0), max(2.0, img.shape[0] / 90))
         side_col = blur * 0.12 + (SIDE + 0.22 * shade) * 0.88  # clean milky glass, a bit darker towards the back
         face_col = blur * 0.3 + 0.7
+    if L.shape[2] > 5:  # golden stars of the European flag: gold glass, the sides a deeper gold
+        g = L[..., 5:6]
+        gface = (blur if style != "solid" else x) * 0.12 + np.float32([0.10, 0.78, 1.0]) * 0.88
+        gside = np.float32([0.05, 0.50, 0.80]) * (0.75 + 0.25 * shade)
+        face_col = face_col * (1 - g) + gface * g
+        side_col = side_col * (1 - g) + gside * g
     x = x * (1 - side * vis) + side_col * side * vis
     x = x * (1 - face * vis) + face_col * face * vis
     x = x + rim * vis * 0.55  # light catches the top edges
@@ -474,7 +504,7 @@ def place(grays, box0, fg0, log=print, back=0.0):
 
 
 def bake(src, a, b, text, out, x=0.5, y=0.37, w=0.95, opacity=0.8, font="montserrat", depth=0.4, style="frost", until=None,
-         fade=1.5, log=print):
+         fade=1.5, stars=False, log=print):
     """until = seconds into the shot when the text is gone (it dissolves - fades and softens - over `fade` seconds before);
     after that the footage runs on untouched and is neither tracked nor solved (fast, and the camera may do anything)."""
     import clipcut, fxface
@@ -483,7 +513,7 @@ def bake(src, a, b, text, out, x=0.5, y=0.37, w=0.95, opacity=0.8, font="montser
     n_all = max(1, round((b - a) * fps))
     n = n_all if until is None else max(2, min(n_all, int(np.ceil(float(until) * fps)) + 1))
     dsess = fxface._session(fxface.DEPTH_MODEL, fxface.DEPTH_URL, "depth (99 MB)")
-    spr, back = sprite(text, font, depth)  # real 3D letters (needs the 3D solve)
+    spr, back = sprite(text, font, depth, stars=bool(stars))  # real 3D letters (+ star ring), needs the 3D solve
     SH, SW = spr[0][0].shape
     imgs = []
     for k in range(n):
@@ -507,7 +537,7 @@ def bake(src, a, b, text, out, x=0.5, y=0.37, w=0.95, opacity=0.8, font="montser
     box0 = np.float32([[x * FW - sw * SW / 2, y * FH - sw * SH], [x * FW + sw * SW / 2, y * FH - sw * SH],
                        [x * FW + sw * SW / 2, y * FH], [x * FW - sw * SW / 2, y * FH]])  # bottom centre at (x, y)
     C, Kf, dist, err = place([cv2.cvtColor(i, cv2.COLOR_BGR2GRAY) for i in imgs], box0, fgs[0] / 255.0, log, back)
-    L0 = None if C.shape[1] == 8 else layers(text, font, depth)[0]  # no 3D solve: painted extrusion (same canvas)
+    L0 = None if C.shape[1] == 8 else layers(text, font, depth, stars=bool(stars))[0]  # no 3D solve: painted (same canvas)
     if err is not None:
         log(f"world text: camera solved, reprojection error mean {err.mean():.2f} px, worst frame {err.max():.2f} px")
     bake.corners, bake.err, bake.K, bake.dist = C, err, Kf, dist
@@ -548,7 +578,7 @@ def bake(src, a, b, text, out, x=0.5, y=0.37, w=0.95, opacity=0.8, font="montser
     return out
 
 
-KEYS = ("x", "y", "w", "opacity", "font", "depth", "style", "until", "fade")
+KEYS = ("x", "y", "w", "opacity", "font", "depth", "style", "until", "fade", "stars")
 
 
 def apply(seg, media_dir, spec, log=print):
@@ -631,7 +661,7 @@ def selftest():
     perr = float(np.abs(Cp - np.stack(truth)).max())
     assert perr < 2.0, f"pan fallback off by {perr:.2f} px"
     # real 3D extrusion: back face 20 px higher on screen (seen from above) -> sides above the letters, none below, crisp face
-    (fp, sp), bk = sprite("TEST", px=120)
+    (fp, sp, _), bk = sprite("TEST", px=120)
     sh, sw_ = fp[0].shape
     fr_q = np.float32([[100, 100], [100 + sw_, 100], [100 + sw_, 100 + sh], [100, 100 + sh]])
     gx, gy = np.meshgrid(np.arange(800, dtype=np.float32), np.arange(400, dtype=np.float32))
@@ -666,7 +696,8 @@ if __name__ == "__main__":
     ap.add_argument("--style", default="frost", choices=["frost", "solid"])
     ap.add_argument("--until", type=float, help="seconds into the shot when the text has dissolved (then plain footage)")
     ap.add_argument("--fade", type=float, default=1.5, help="dissolve duration in seconds")
+    ap.add_argument("--stars", action="store_true", help="ring of 12 golden stars (European flag) around the text")
     o = ap.parse_args()
     src = Path(o.src)
     out = o.out or str(src.with_name(f"{src.stem}_{o.a:.2f}-{o.b:.2f}_world.mp4"))
-    print(bake(src, o.a, o.b, o.text, out, o.x, o.y, o.w, o.opacity, o.font, o.depth, o.style, o.until, o.fade))
+    print(bake(src, o.a, o.b, o.text, out, o.x, o.y, o.w, o.opacity, o.font, o.depth, o.style, o.until, o.fade, o.stars))

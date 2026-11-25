@@ -50,7 +50,9 @@ Goal: calm, clean, PROFESSIONAL - like a good documentary or an image film, not 
      `w` = width (0.8-0.95 = big); `x` = centre. Options: `opacity` 0.8, `style` frost|solid,
      `font` montserrat|playfair|impact, `depth` 0.4 (block depth / letter height), `until`+`fade` (seconds into the shot
      when the text has dissolved, e.g. `until=9 fade=2` before the camera tilts onto the people - after that plain footage, and
-     nothing after `until` is tracked, so camera moves there don't matter). Recipe: `look` the shot, pick y from the first frame (where is the back edge of the
+     nothing after `until` is tracked, so camera moves there don't matter). `stars=1` = the ring of 12 golden 3D stars of the
+     European flag around the text (the emblem is square: use a short text like `"EUROPA"` and `w=0.25-0.3`, `y` = bottom of
+     the ring; `""` = stars only). Recipe: `look` the shot, pick y from the first frame (where is the back edge of the
      building, where are the people), run it (~50 s per second of footage; the log prints the solve error - mean under 1 px is good), then LOOK at 4 frames spread over the shot
      (`ffmpeg -i media/out.mp4 -vf "select='eq(n,0)+eq(n,80)+eq(n,160)+eq(n,230)',scale=800:-2,tile=2x2" -frames:v 1 -fps_mode passthrough tmp/s.png`):
      the text must not cover faces/people and must read clearly. Re-run with new values any time (it re-bakes from the original
@@ -71,6 +73,17 @@ Goal: calm, clean, PROFESSIONAL - like a good documentary or an image film, not 
 3. Render: `python clipcut.py render project.json media/fertig.mp4`, then LOOK at frames
    (`ffmpeg -ss T -i media/fertig.mp4 -frames:v 1 tmp/f.png`) before telling the user it is done.
 Privacy: footage of students stays on this computer; only the contact sheets you read leave it. Never upload media anywhere.
+
+## Europe video recipe (Europatag / Europaschule)
+1. Intro: `op mapintro 50.866 7.05 "Lessing-Gymnasium" sub="Köln-Porz"` = 7 s map flight (mapintro.py, offline map data in
+   data/europe.json): Europe with the ring of 12 gold stars -> zoom over Germany (gold outline) down the Rhine -> gold pin
+   with the school logo; it is put in front of the first shot with a dissolve. Another place: its lat/lon + label.
+2. Drone / school shot: `op worldtext #N "EUROPA" stars=1 w=0.28 y=0.45` (3D star ring in the scene) or
+   `op worldtext #N "LESSING GYMNASIUM" y=0.37 w=0.95` (+ `until=`/`fade=` to dissolve it before the camera tilts down).
+3. Interviews: `op captions #N` (+ `op translate` for a second language: German + English / French ...) and
+   `op lowerthird "Name" "Klasse 9b"` for every speaker; `op logo` at the start or end.
+4. Calm look (`filter: clean` for bright outdoor/drone, `kino` indoor), dissolves 0.5-0.8 s, music with fadeIn/fadeOut.
+Rights: the European anthem as a composition is free, most recordings are not - use a free (CC0/public domain) recording.
 
 ## Fully automatic edit (fast music montages)
 ```
@@ -104,6 +117,8 @@ python clipcut.py op worldtext #N "TEXT" y=0.37 w=0.95         big 3D frosted te
 python clipcut.py op worldtext #N none                         remove it again (back to the original footage)
 python clipcut.py op lowerthird "Annika Fink" "Lehrerin" 3.0    branded glass lower third at 3.0 s (4.5 s)
 python clipcut.py op logo corner=tr                            school logo in the top right corner
+python clipcut.py op mapintro 50.866 7.05 "Lessing-Gymnasium" sub="Köln-Porz"   map flight Europe -> school as the first shot
+python clipcut.py op worldtext #N "EUROPA" stars=1 w=0.28 y=0.45   3D ring of 12 gold stars + text standing in the scene
 python clipcut.py op captions #2                               subtitles for main-track shot #2 (prints the cues to translate)
 python clipcut.py op translate tmp/tr.json                     second-language line under each cue ({id: text})
 python clipcut.py op transition #3 dissolve 0.6                transition after clip #3
@@ -169,4 +184,4 @@ macOS: double-click `start.command` (installs into `.venv` on the first run; nee
 Windows: `pip install -r requirements.txt`, ffmpeg on PATH, `start.bat`. Or `python server.py` -> editor on http://127.0.0.1:8777.
 On the Mac use `.venv/bin/python clipcut.py ...` (or activate the venv) so the installed packages are found.
 Checks: `python clipcut.py selftest` (logic), `python clipcut.py rendertest` (2 s render through every feature),
-`python copy_edit.py`, `python trends.py`, `python transitions.py`, `python worldtext.py selftest`, `python brand.py selftest`.
+`python copy_edit.py`, `python trends.py`, `python transitions.py`, `python worldtext.py selftest`, `python brand.py selftest`, `python mapintro.py selftest`.

@@ -1139,6 +1139,19 @@ def op(args, root=ROOT):
         P["overlay"].append({"id": g, "media": f"_logo_{g}.png", "start": st, "in": 0, "out": dur, "speed": 1, "x": round(x, 4),
                              "y": round(y, 4), "scale": round(sc, 4), "opacity": 0.92, "volume": 0, "logo": True, "fade": {"in": 0.6, "out": 0.6}})
         msg = f"Logo {c} from {st:.1f}s"
+    elif cmd == "mapintro":  # op mapintro LAT LON ["Label"] [sub=Köln-Porz] [dur=7] : Europe -> school map flight, first shot
+        import mapintro
+        lat, lon = float(rest[0]), float(rest[1])
+        label = rest[2] if len(rest) > 2 and "=" not in rest[2] else ""
+        kw = dict(kv.split("=", 1) for kv in rest[2:] if "=" in kv)
+        W, H = P.get("canvas") or [int(probe(str(Path(root) / "media" / P["video"][0]["media"]))["video"][k]) for k in ("width", "height")]
+        g = uid()
+        dur = float(kw.get("dur", 7))
+        mapintro.render(Path(root) / "media" / f"_map_{g}.mp4", lat, lon, label, kw.get("sub", ""), dur, W, H, P.get("fps", 30),
+                        log=lambda m: print(m, file=sys.stderr))
+        P["video"].insert(0, {"id": g, "media": f"_map_{g}.mp4", "in": 0, "out": dur, "speed": 1, "volume": 0,
+                              "transition": {"type": "dissolve", "dur": 0.8}})
+        msg = f"Map intro ({dur:.0f} s) in front of the first shot"
     elif cmd == "captions":  # op captions SEL [size=0.045] | op captions SEL none : subtitles from the speech of one main-track shot
         k, i, x = find(rest[0])
         if k != "video":
