@@ -1,4 +1,4 @@
-# ClipCut
+# Luminar Videos
 
 Ein Videoschnitt-Programm im Stil von CapCut, das man zusammen mit **Claude Code** benutzt: Du sagst Claude, was für ein Video
 du willst, und Claude schneidet es. Das Programm läuft ganz auf deinem eigenen Rechner (Mac oder Windows), ohne Anmeldung und ohne Cloud.

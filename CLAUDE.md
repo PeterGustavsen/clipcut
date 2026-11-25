@@ -1,6 +1,7 @@
-# ClipCut — agent API
+# Luminar Videos — agent API
 
-ClipCut is a CapCut-style video editor that Claude Code drives. Typical users here are teachers and students making school videos
+Luminar Videos (code name clipcut: the commands stay `clipcut.py ...`) is a CapCut-style video editor that Claude Code drives.
+The users call it "Luminar Videos" - use that name when you talk to them. Typical users here are teachers and students making school videos
 (project days, Europe day, school trips, interviews, presentations). They speak German; answer in German, in plain words, no jargon.
 `project.json` in this folder IS the timeline. Edit it with any tool and the open editor reloads it within 2 s,
 flashes what changed, jumps the playhead there and shows the last `agent.jsonl` message as a 🤖 banner.

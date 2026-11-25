@@ -1,4 +1,4 @@
-"""ClipCut editor: python server.py  ->  http://127.0.0.1:8777"""
+"""Luminar Videos editor: python server.py  ->  http://127.0.0.1:8777"""
 import json, os, re, shutil, sys, time, traceback
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -338,5 +338,5 @@ class Server(ThreadingHTTPServer):
 PORT = 8777
 
 if __name__ == "__main__":
-    print(f"ClipCut editor on http://127.0.0.1:{PORT}")
+    print(f"Luminar Videos editor on http://127.0.0.1:{PORT}")
     Server(("127.0.0.1", PORT), H).serve_forever()

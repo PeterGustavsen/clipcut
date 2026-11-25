@@ -1,5 +1,5 @@
 #!/bin/bash
-# ClipCut auf dem Mac starten: im Finder doppelklicken.
+# Luminar Videos auf dem Mac starten: im Finder doppelklicken.
 # Beim ersten Start werden die Python-Pakete in .venv installiert (dauert ein paar Minuten).
 cd "$(dirname "$0")"
 
