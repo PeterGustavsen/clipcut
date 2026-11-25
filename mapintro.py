@@ -189,30 +189,26 @@ def render(out, lat, lon, label="", sub="", dur=10.0, W=1920, H=1080, fps=30, co
     k_lat = 1 / np.cos(np.radians(lat))
     dom = marks[0][1] if marks else None
     Dc = dom.mean(0) if dom is not None else None
-    use_dom = Dc is not None and np.linalg.norm(Dc - T) < 40e3  # a landmark near the school: the flight stops there first
-    t_zoom0 = dur * 0.16
-    t_dom, t_hold, t_zoom1 = (dur * 0.50, dur * 0.62, dur * 0.84) if use_dom else (None, None, dur * 0.80)
-    w_dom = 1.1e3
+    near_dom = Dc is not None and np.linalg.norm(Dc - T) < 40e3  # a landmark near the school: a small gimmick on the way
+    t_zoom0, t_zoom1 = dur * 0.16, dur * 0.80
     Tend = T + np.array([0.13 * w1 * k_lat, 0.0])  # end: pin left of centre, logo beside it
+    dom_px = 120 * u  # the landmark model is at least this tall on screen (navigation-app style), else it would be a dot
 
     def cam(t):
-        """(centre, visible width) at time t: Europe -> (landmark, short stop) -> school."""
+        """(centre, visible width) at time t: Europe -> straight down to the school (a slight lean towards the landmark
+        while the city is in view, so it stays on screen for a moment)."""
         if t < t_zoom0:
             return c0, w0 * (1 - 0.08 * t / t_zoom0)
-        B, wb, t1 = (Dc, w_dom, t_dom) if use_dom else (Tend, w1, t_zoom1)
-        if t <= t1:
+        if t <= t_zoom1:
             wa = w0 * 0.92
-            z = ease(min(1.0, (t - t_zoom0) / (t1 - t_zoom0)) ** 0.8)
-            width = math.exp(math.log(wa) + (math.log(wb) - math.log(wa)) * z)
-            mm = (math.log(wa) - math.log(width)) / (math.log(wa) - math.log(wb))
+            z = ease(min(1.0, (t - t_zoom0) / (t_zoom1 - t_zoom0)) ** 0.8)
+            width = math.exp(math.log(wa) + (math.log(w1) - math.log(wa)) * z)
+            mm = (math.log(wa) - math.log(width)) / (math.log(wa) - math.log(w1))
             # the destination's screen offset shrinks smoothly to 0: it never leaves the frame, even over a 1000x zoom
-            return B + (c0 - B) * (width / wa) * (1 - ease(mm)), width
-        if t <= t_hold:  # at the cathedral: slow push-in while the model rises
-            return Dc, w_dom * (1 - 0.12 * ease((t - t_dom) / (t_hold - t_dom)))
-        if t <= t_zoom1:  # over to the school: up a little (arc), across, down again
-            s_ = ease((t - t_hold) / (t_zoom1 - t_hold))
-            lw = math.log(w_dom * 0.88) + (math.log(w1) - math.log(w_dom * 0.88)) * s_ + math.log(3.5) * math.sin(math.pi * s_)
-            return Dc + (Tend - Dc) * s_, math.exp(lw)
+            ctr = Tend + (c0 - Tend) * (width / wa) * (1 - ease(mm))
+            if near_dom:
+                ctr = ctr + (Dc - T) * 0.42 * math.exp(-((math.log(width) - math.log(32e3)) / 0.8) ** 2)
+            return ctr, width
         return Tend, w1 * (1 - 0.03 * ease((t - t_zoom1) / (dur - t_zoom1)))
 
     logo = brand.logo(round(58 * u), wide=True, shadow=True)
@@ -269,8 +265,8 @@ def render(out, lat, lon, label="", sub="", dur=10.0, W=1920, H=1080, fps=30, co
             layer(roads[3], False, (0xe8, 0xdc, 0xcf), 2.2 * u + 18 * scale, 0.55 * ramp(400e3, 80e3))
             for name, g in marks:  # landmarks (Kölner Dom): gold footprint while the city is in view
                 layer([g], True, GOLD, 2 * u, ramp(250e3, 50e3), fill=(0x6f, 0xb4, 0xe6))
-            if use_dom:  # the cathedral rises out of the map as a small model when the camera arrives
-                draw_dom(img, P(dom), scale * k_lat, ease((t - t_dom + 1.0) / 1.3), u)
+            if near_dom:  # gimmick: the cathedral pops up as a small gold landmark model while we fly over the city
+                draw_dom(img, P(dom), max(scale * k_lat, dom_px / (157 * 1.15)), ramp(110e3, 55e3), u)
             for xy in ([] if osm_w >= 1 else rivers):
                 q = P(xy)
                 if q[:, 0].max() < 0 or q[:, 0].min() > W or q[:, 1].max() < 0 or q[:, 1].min() > H:
@@ -313,12 +309,9 @@ def render(out, lat, lon, label="", sub="", dur=10.0, W=1920, H=1080, fps=30, co
             for name, g in marks:
                 q = P(g).mean(0)
                 a = int(235 * ramp(250e3, 50e3))
-                close = use_dom and width < 8e3
-                if a > 0 and 0 < q[0] < W and 0 < q[1] < H:
-                    if close:  # at the stop: name beside the model
-                        d.text((q[0] + 175 * u, q[1] - 40 * u), name, font=font("bold", 34 * u), fill=(255, 214, 120, a), anchor="lm")
-                    else:
-                        d.text((q[0] + 12 * u, q[1] - 30 * u), name, font=font("bold", 22 * u), fill=(255, 214, 120, a))
+                kk = max(scale * k_lat, dom_px / (157 * 1.15)) * 1.15  # model px per metre
+                if a > 0 and 0 < q[0] < W and 0 < q[1] < H:  # name beside the model
+                    d.text((q[0] + 52 * kk + 10 * u, q[1] - 60 * kk), name, font=font("bold", 24 * u), fill=(255, 214, 120, a), anchor="lm")
             if PL and osm_w > 0:  # licence: OpenStreetMap data must be credited where it is shown
                 d.text((W - 16 * u, H - 14 * u), "Kartendaten © OpenStreetMap-Mitwirkende, Natural Earth", font=font("medium", 15 * u),
                        fill=(255, 255, 255, int(170 * osm_w)), anchor="rd")

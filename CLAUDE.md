@@ -77,8 +77,8 @@ Privacy: footage of students stays on this computer; only the contact sheets you
 ## Europe video recipe (Europatag / Europaschule)
 1. Intro: `op mapintro 50.866 7.05 "Lessing-Gymnasium" sub="Köln-Porz"` = 10 s map flight (mapintro.py):
    Europe with the turning ring of 12 gold stars -> Germany (gold outline) -> region with city names -> Köln streets, the
-   Rhine at its real width -> short stop at the Kölner Dom (a gold 3D landmark model rises out of the map) -> arc over to
-   Porz, the buildings fade in -> the school buildings light up gold, pin + school logo. Renders in ~3 min.
+   Rhine at its real width (on the way the Kölner Dom pops up as a small gold 3D landmark model - a gimmick, no stop) ->
+   straight down to Porz, the buildings fade in -> the school buildings light up gold, pin + school logo. Renders in ~3 min.
    Put in front of the first shot with a dissolve. Map data offline: data/europe.json (Natural Earth) + data/places/
    koeln_lessing.json (OpenStreetMap streets/buildings around the school and the Dom). Another place: its lat/lon + label;
    streets/buildings are then fetched once from OpenStreetMap (Overpass, needs internet; without it the flight ends at the
