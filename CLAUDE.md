@@ -75,9 +75,13 @@ Goal: calm, clean, PROFESSIONAL - like a good documentary or an image film, not 
 Privacy: footage of students stays on this computer; only the contact sheets you read leave it. Never upload media anywhere.
 
 ## Europe video recipe (Europatag / Europaschule)
-1. Intro: `op mapintro 50.866 7.05 "Lessing-Gymnasium" sub="Köln-Porz"` = 7 s map flight (mapintro.py, offline map data in
-   data/europe.json): Europe with the ring of 12 gold stars -> zoom over Germany (gold outline) down the Rhine -> gold pin
-   with the school logo; it is put in front of the first shot with a dissolve. Another place: its lat/lon + label.
+1. Intro: `op mapintro 50.866 7.05 "Lessing-Gymnasium" sub="Köln-Porz"` = 9 s map flight (mapintro.py, ~1 min to render):
+   Europe with the turning ring of 12 gold stars -> Germany (gold outline) -> region with city names -> Köln streets, the
+   Rhine at its real width, the Dom -> the buildings of Porz fade in -> the school building lights up gold, pin + school logo.
+   Put in front of the first shot with a dissolve. Map data offline: data/europe.json (Natural Earth) + data/places/
+   koeln_lessing.json (OpenStreetMap streets/buildings around the school and the Dom). Another place: its lat/lon + label;
+   streets/buildings are then fetched once from OpenStreetMap (Overpass, needs internet; without it the flight ends at the
+   region). The OSM credit line bottom right is required by the licence - leave it in.
 2. Drone / school shot: `op worldtext #N "EUROPA" stars=1 w=0.28 y=0.45` (3D star ring in the scene) or
    `op worldtext #N "LESSING GYMNASIUM" y=0.37 w=0.95` (+ `until=`/`fade=` to dissolve it before the camera tilts down).
 3. Interviews: `op captions #N` (+ `op translate` for a second language: German + English / French ...) and

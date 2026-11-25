@@ -44,9 +44,83 @@ def star(d, cx, cy, r, fill):
     d.polygon(pts, fill=fill)
 
 
-def render(out, lat, lon, label="", sub="", dur=7.0, W=1920, H=1080, fps=30, country=None, log=print):
+OVERPASS = ["https://maps.mail.ru/osm/tools/overpass/api/interpreter", "https://overpass.private.coffee/api/interpreter",
+            "https://overpass-api.de/api/interpreter"]
+
+
+def fetch_place(lat, lon, log=print):
+    """Streets, buildings, the river and the school building around (lat, lon) from OpenStreetMap (Overpass), cached in
+    data/places/. Bundled: Köln / Lessing-Gymnasium. Returns the place dict or None (offline: the intro just has no streets)."""
+    for f in sorted((ROOT / "data" / "places").glob("*.json")):
+        d = json.loads(f.read_text(encoding="utf-8"))
+        if abs(d["target"]["lat"] - lat) < 0.03 and abs(d["target"]["lon"] - lon) < 0.03:
+            return d
+    import urllib.parse, urllib.request
+    kx, ky = 111320 * np.cos(np.radians(lat)), 110540
+    bb = lambda r: f"({lat - r / ky:.4f},{lon - r / kx:.4f},{lat + r / ky:.4f},{lon + r / kx:.4f})"
+
+    def q(ql):
+        for url in OVERPASS:
+            try:
+                req = urllib.request.Request(url, urllib.parse.urlencode({"data": ql}).encode(), {"User-Agent": "clipcut-mapintro/1.0"})
+                return [e for e in json.loads(urllib.request.urlopen(req, timeout=180).read())["elements"] if e.get("geometry")]
+            except Exception as e:  # busy mirror -> next one
+                log(f"map intro: {url.split('/')[2]} failed ({e.__class__.__name__})")
+        raise RuntimeError("no Overpass server reachable")
+
+    try:
+        log("map intro: loading streets and buildings from OpenStreetMap (once) ...")
+        major = q(f'[out:json][timeout:170];way["highway"~"^(motorway|trunk|primary|secondary)$"]{bb(30000)};out geom;')
+        minor = q(f'[out:json][timeout:170];way["highway"~"^(tertiary|residential|unclassified|living_street)$"]{bb(3500)};out geom;')
+        bld = q(f'[out:json][timeout:170];way["building"]{bb(2500)};out geom;')
+        water = q(f'[out:json][timeout:170];way["waterway"="river"]{bb(30000)};out geom;')
+    except Exception as e:
+        log(f"map intro: no street detail ({e})")
+        return None
+    S = lambda g: [v for pnt in g for v in (round(pnt["lon"] * 1e5), round(pnt["lat"] * 1e5))]
+    rank = {"motorway": 3, "trunk": 3, "primary": 2, "secondary": 1}
+    near = min(bld, key=lambda e: (np.mean([g["lat"] for g in e["geometry"]]) - lat) ** 2
+               + ((np.mean([g["lon"] for g in e["geometry"]]) - lon) * np.cos(np.radians(lat))) ** 2) if bld else None
+    d = {"source": "© OpenStreetMap contributors (ODbL)", "scale": 1e5, "target": {"lat": lat, "lon": lon, "poly": S(near["geometry"]) if near else None},
+         "roads_major": [[rank[e["tags"]["highway"]]] + S(e["geometry"]) for e in major], "roads_minor": [S(e["geometry"]) for e in minor],
+         "buildings": [S(e["geometry"]) for e in bld], "water": [S(e["geometry"]) for e in water], "landmarks": []}
+    (ROOT / "data" / "places").mkdir(parents=True, exist_ok=True)
+    (ROOT / "data" / "places" / f"{lat:.3f}_{lon:.3f}.json").write_text(json.dumps(d, separators=(",", ":")), encoding="utf-8")
+    return d
+
+
+def _geo(flat):
+    a = np.float64(flat).reshape(-1, 2) / 1e5
+    return np.stack(merc(a[:, 0], a[:, 1]), 1)
+
+
+class _Layer:
+    """Many polylines/polygons in mercator metres + their bounding boxes, so each frame only draws what is on screen."""
+
+    def __init__(self, geoms):
+        self.g = geoms
+        self.bb = np.array([[q[:, 0].min(), q[:, 1].min(), q[:, 0].max(), q[:, 1].max()] for q in geoms]) if geoms else np.zeros((0, 4))
+
+    def visible(self, x0, y0, x1, y1):
+        if not len(self.g):
+            return []
+        m = (self.bb[:, 2] >= x0) & (self.bb[:, 0] <= x1) & (self.bb[:, 3] >= y0) & (self.bb[:, 1] <= y1)
+        return [self.g[i] for i in np.nonzero(m)[0]]
+
+
+def render(out, lat, lon, label="", sub="", dur=9.0, W=1920, H=1080, fps=30, country=None, log=print):
     import brand
     D = json.loads((ROOT / "data" / "europe.json").read_text(encoding="utf-8"))
+    PL = fetch_place(lat, lon, log)
+    if PL and PL["target"].get("poly"):  # land the pin on the real school building
+        a = np.float64(PL["target"]["poly"]).reshape(-1, 2) / 1e5
+        lon, lat = float(a[:, 0].mean()), float(a[:, 1].mean())
+    roads = {r: _Layer([_geo(x[1:]) for x in (PL or {}).get("roads_major", []) if x[0] == r]) for r in (1, 2, 3)}
+    minor = _Layer([_geo(x) for x in (PL or {}).get("roads_minor", [])])
+    blds = _Layer([_geo(x) for x in (PL or {}).get("buildings", [])])
+    water = _Layer([_geo(x) for x in (PL or {}).get("water", [])])
+    marks = [(m["name"], _geo(m["poly"])) for m in (PL or {}).get("landmarks", [])]
+    school = _geo(PL["target"]["poly"]) if PL and PL["target"].get("poly") else None
     eu = set(D["eu"])
     tx, ty = merc(lon, lat)
     if country is None:  # the country the target lies in (point in polygon)
@@ -61,11 +135,11 @@ def render(out, lat, lon, label="", sub="", dur=7.0, W=1920, H=1080, fps=30, cou
               if abs(p["lat"] - lat) > 0.02 or abs(p["lon"] - lon) > 0.02]  # the target itself gets the pin, not a label
     u = min(W, H * 16 / 9) / 1920  # 1 unit = 1 px at 1920 wide
     font = lambda w, px: brand.F(w, px)
-    w0, w1 = 4600e3, 170e3  # visible width (m at the target's latitude): Europe -> region (neighbour cities still in view)
+    w0, w1 = 4600e3, (2.6e3 if PL else 170e3)  # visible width (m): Europe -> the school's quarter (-> region without street data)
     c0 = np.array(merc(11.0, 51.5))
     T = np.array([tx, ty])
     k_lat = 1 / np.cos(np.radians(lat))
-    t_zoom0, t_zoom1 = dur * 0.27, dur * 0.80
+    t_zoom0, t_zoom1 = dur * 0.22, dur * 0.80
     logo = brand.logo(round(58 * u), wide=True, shadow=True)
     n = int(round(dur * fps))
     with tempfile.TemporaryDirectory() as tmp:
@@ -77,7 +151,8 @@ def render(out, lat, lon, label="", sub="", dur=7.0, W=1920, H=1080, fps=30, cou
             m = (math.log(w0) - math.log(width)) / (math.log(w0) - math.log(w1))
             scale = W / (width * k_lat)  # px per mercator metre
             Tv = T + np.array([0.13 * W / scale, 0.0]) * min(1.0, max(0.0, m))  # end: pin left of centre, logo beside it
-            ctr = c0 + (Tv - c0) * min(1.0, max(0.0, m)) ** 0.7
+            # the target's screen offset shrinks smoothly to 0: it never leaves the frame, even over a 1000x zoom
+            ctr = Tv + (c0 - Tv) * (width / w0) * (1 - ease(min(1.0, max(0.0, m))))
             P = lambda xy: np.stack([(xy[..., 0] - ctr[0]) * scale + W / 2, (ctr[1] - xy[..., 1]) * scale + H / 2], -1)
             img = np.zeros((H, W, 3), np.uint8); img[:] = SEA
             yy, xx = np.mgrid[0:H, 0:W]
@@ -97,11 +172,43 @@ def render(out, lat, lon, label="", sub="", dur=7.0, W=1920, H=1080, fps=30, cou
                     continue
                 cv2.polylines(img, [np.int32(q * 16)], True, BORDER, max(1, round(1.2 * u)), cv2.LINE_AA, shift=4)
             rw = max(1, round(u * (1 + 2.5 * z)))
-            for xy in rivers:
+            ramp = lambda a, b: ease((math.log(a) - math.log(width)) / (math.log(a) - math.log(b)))  # 0 at width a -> 1 at width b
+            osm_w = ramp(90e3, 45e3) if len(water.g) else 0  # OSM river replaces the coarse map river when zooming in
+            view = (ctr[0] - W / 2 / scale, ctr[1] - H / 2 / scale, ctr[0] + W / 2 / scale, ctr[1] + H / 2 / scale)
+
+            def layer(geoms, closed, col, width_px, alpha, fill=None):
+                nonlocal img
+                vis = geoms.visible(*view) if isinstance(geoms, _Layer) else geoms
+                if alpha <= 0.01 or not vis:
+                    return
+                ov = img.copy()
+                pts = [np.int32(P(g) * 16) for g in vis]
+                if fill is not None:
+                    cv2.fillPoly(ov, pts, fill, cv2.LINE_AA, shift=4)
+                if width_px:
+                    cv2.polylines(ov, pts, closed, col, max(1, round(width_px)), cv2.LINE_AA, shift=4)
+                img = cv2.addWeighted(ov, alpha, img, 1 - alpha, 0)
+
+            if osm_w > 0:  # the Rhine at its real width (~350 m), at least a visible line
+                layer(water, False, RIVER, max(rw, 350 * scale), osm_w)
+            layer(roads[3], False, (0xe8, 0xdc, 0xcf), 2.2 * u + 18 * scale, 0.55 * ramp(160e3, 70e3))
+            layer(roads[2], False, (0xe0, 0xd2, 0xc2), 1.6 * u + 12 * scale, 0.45 * ramp(70e3, 30e3))
+            layer(roads[1], False, (0xd8, 0xc8, 0xb6), 1.2 * u + 9 * scale, 0.40 * ramp(30e3, 14e3))
+            layer(minor, False, (0xd0, 0xbc, 0xa6), 0.9 * u + 6 * scale, 0.35 * ramp(9e3, 4.5e3))
+            layer(blds, True, (0xc8, 0xa6, 0x80), 0.8 * u if scale > 0.3 else 0, 0.75 * ramp(12e3, 5e3), fill=(0xa6, 0x7c, 0x52))
+            for name, g in marks:  # landmarks (Kölner Dom): gold outline while the city is in view
+                layer([g], True, GOLD, 2 * u, ramp(120e3, 50e3), fill=(0x6f, 0xb4, 0xe6))
+            for xy in ([] if osm_w >= 1 else rivers):
                 q = P(xy)
                 if q[:, 0].max() < 0 or q[:, 0].min() > W or q[:, 1].max() < 0 or q[:, 1].min() > H:
                     continue
-                cv2.polylines(img, [np.int32(q * 16)], False, RIVER, rw, cv2.LINE_AA, shift=4)
+                if osm_w > 0:
+                    ov = img.copy(); cv2.polylines(ov, [np.int32(q * 16)], False, RIVER, rw, cv2.LINE_AA, shift=4)
+                    img = cv2.addWeighted(ov, 1 - osm_w, img, osm_w, 0)
+                else:
+                    cv2.polylines(img, [np.int32(q * 16)], False, RIVER, rw, cv2.LINE_AA, shift=4)
+            if school is not None:  # the school building lights up gold before the pin lands
+                layer([school], True, GOLD, 2.5 * u, ease((t - t_zoom1 + 0.8) / 0.8), fill=(0x4a, 0xa6, 0xe0))
             if country and hl > 0:  # gold outline of the target country
                 ov = img.copy()
                 for a3, xy in polys:
@@ -120,7 +227,7 @@ def render(out, lat, lon, label="", sub="", dur=7.0, W=1920, H=1080, fps=30, cou
                 need = 1.2e6 if width > 1500e3 else 6e5 if width > 500e3 else 2.5e5
                 if pop < need:
                     continue
-                a = int(200 * ease((t - t_zoom0) / (dur * 0.1))) if width < 2500e3 else 0
+                a = int(200 * ease((t - t_zoom0) / (dur * 0.1)) * (1 - ramp(25e3, 10e3))) if width < 2500e3 else 0
                 if a <= 0:
                     continue
                 f_ = font("medium", 20 * u)
@@ -132,12 +239,20 @@ def render(out, lat, lon, label="", sub="", dur=7.0, W=1920, H=1080, fps=30, cou
                 r = max(2, round(3 * u))
                 d.ellipse([q[0] - r, q[1] - r, q[0] + r, q[1] + r], fill=(255, 255, 255, a))
                 d.text((q[0] + 8 * u, q[1] - 12 * u), name, font=f_, fill=(230, 236, 242, a))
+            for name, g in marks:
+                q = P(g).mean(0)
+                a = int(230 * ramp(120e3, 50e3) * (1 - ramp(9e3, 5e3)))
+                if a > 0 and 0 < q[0] < W and 0 < q[1] < H:
+                    d.text((q[0] + 12 * u, q[1] - 30 * u), name, font=font("bold", 22 * u), fill=(255, 214, 120, a))
+            if PL and osm_w > 0:  # licence: OpenStreetMap data must be credited where it is shown
+                d.text((W - 16 * u, H - 14 * u), "Kartendaten © OpenStreetMap-Mitwirkende, Natural Earth", font=font("medium", 15 * u),
+                       fill=(255, 255, 255, int(170 * osm_w)), anchor="rd")
             # ring of 12 stars over Europe at the start
             sa = ease(t / 0.8) * (1 - ease((t - t_zoom0 * 0.8) / 0.7))
             if sa > 0:
                 rr, s = 0.30 * H * (1 + 0.04 * t), 0.032 * H
                 for k in range(12):
-                    ang = -np.pi / 2 + k * np.pi / 6 + t * 0.05
+                    ang = -np.pi / 2 + k * np.pi / 6 + t * 0.32  # slow, visible turn
                     star(d, W / 2 + rr * np.cos(ang), H / 2 + rr * np.sin(ang), s, (255, 204, 0, int(255 * sa)))
             # pin + label at the end
             pa = ease((t - t_zoom1 + 0.25) / 0.5)
@@ -184,7 +299,7 @@ def selftest():
     gold = lambda f: ((f[..., 2] > 180) & (f[..., 1] > 120) & (f[..., 0] < 120)).mean()  # gold, anti-aliased at this small size
     assert gold(first) > 0.002, "the 12 gold stars should show at the start"
     assert np.abs(first.astype(int) - last.astype(int)).mean() > 8, "the map must zoom (first and last frame differ)"
-    assert gold(last) > 0.0005, "pin / gold outline at the end"
+    assert gold(last) > 0.0002, "pin / gold school building at the end"
     cap.release(); os.remove(out)
     print("mapintro selftest ok")
 
@@ -195,7 +310,7 @@ if __name__ == "__main__":
         selftest(); sys.exit()
     ap = argparse.ArgumentParser()
     ap.add_argument("out"); ap.add_argument("lat", type=float); ap.add_argument("lon", type=float); ap.add_argument("label", nargs="?", default="")
-    ap.add_argument("--sub", default=""); ap.add_argument("--dur", type=float, default=7.0)
+    ap.add_argument("--sub", default=""); ap.add_argument("--dur", type=float, default=9.0)
     ap.add_argument("--w", type=int, default=1920); ap.add_argument("--h", type=int, default=1080); ap.add_argument("--fps", type=int, default=30)
     o = ap.parse_args()
     print(render(o.out, o.lat, o.lon, o.label, o.sub, o.dur, o.w, o.h, o.fps))
