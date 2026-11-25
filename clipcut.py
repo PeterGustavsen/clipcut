@@ -1125,7 +1125,8 @@ def op(args, root=ROOT):
         kw = dict(kv.split("=", 1) for kv in rest)
         W, H = P.get("canvas") or [int(probe(str(Path(root) / "media" / P["video"][0]["media"]))["video"][k]) for k in ("width", "height")]
         total = sum(seg_len(v) for v in P["video"]) or 10
-        st = float(kw.get("start", 0)); dur = float(kw.get("dur", total - st))
+        intro = seg_len(P["video"][0]) if P["video"] and str(P["video"][0].get("media", "")).startswith("_map_") else 0
+        st = float(kw.get("start", intro)); dur = float(kw.get("dur", total - st))  # the map intro already shows the logo
         h = round(float(kw.get("size", 0.042)) * min(W, H))
         h = min(h, round(0.3 * W / 9.5))  # the wide logo is ~9.5x as wide as tall: at most 30 % of the frame width
         g = uid()

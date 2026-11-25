@@ -69,7 +69,7 @@ Goal: calm, clean, PROFESSIONAL - like a good documentary or an image film, not 
      `op lowerthird "Name" "Rolle / Klasse" START [DUR]` = glassmorphism card (the video behind it blurred, light Lessing-blue
      veil, gold accent, school logo on the right), fades in/out, sits above the subtitles. Use for every person who speaks.
      `op logo [corner=tr] [start=] [dur=]` = the white/gold school logo small in a corner (whole video by default; use it on
-     the intro/outro or throughout, not both with a big title). `python brand.py logo out.png [--wide] [--tagline]` = logo file.
+     the intro/outro or throughout, not both with a big title; it starts after the map intro by itself - that one already ends on the logo). `python brand.py logo out.png [--wide] [--tagline]` = logo file.
 3. Render: `python clipcut.py render project.json media/fertig.mp4`, then LOOK at frames
    (`ffmpeg -ss T -i media/fertig.mp4 -frames:v 1 tmp/f.png`) before telling the user it is done.
 Privacy: footage of students stays on this computer; only the contact sheets you read leave it. Never upload media anywhere.
