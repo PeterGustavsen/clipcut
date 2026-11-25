@@ -12,6 +12,13 @@ Media lives in `media/` and is referenced by basename only. Runs on macOS (`star
 `start.command` once), `brew install ffmpeg` if `ffmpeg` is missing. Then check once: `.venv/bin/python clipcut.py rendertest`.
 The editor window (live preview) = `start.command`; you can edit while it is open.
 
+## The user's videos ("benutze die Videos X", "die Clips vom Europatag", "die Videos in Downloads")
+They are usually NOT in media/ yet. Find them yourself: `ls` / search ~/Downloads, ~/Desktop (Schreibtisch), ~/Movies (Filme),
+~/Documents, ~/Pictures and any folder the user names (match names loosely, also .mov/.MOV from iPhones). COPY them into media/
+(never move or delete the originals), then work with media/<name>. Several hits or nothing found -> show what you found and ask.
+Photos still inside the Mac Photos app are not reachable as files: ask the user to drag them out into a folder (or into the
+editor window). macOS may ask "Terminal möchte auf Dateien in Downloads zugreifen" -> tell the user to click "Erlauben".
+
 ## How to make a school video (the default unless the user asks for something else)
 Goal: calm, clean, PROFESSIONAL - like a good documentary or an image film, not a TikTok meme edit.
 1. LOOK at the footage first: `python clipcut.py look media/x.mp4 --n 12` for every clip (contact sheet image -> read it). Note what

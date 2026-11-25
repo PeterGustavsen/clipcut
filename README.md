@@ -12,13 +12,15 @@ Zeitlupe, Keyframes, Masken und Green Screen.
 2. Im Terminal: `brew install python ffmpeg`
 3. **Claude Code** installieren: https://claude.com/claude-code (du brauchst dafür ein Claude-Konto, z. B. Pro).
 4. Diesen Ordner herunterladen (grüner Knopf „Code“ → „Download ZIP“) und entpacken, z. B. in „Dokumente“.
-5. Im Terminal einmal: `chmod +x ~/Documents/clipcut-main/start.command` (an den Ordnerort anpassen).
+5. Im Terminal einmal: `chmod +x ~/Documents/clipcut-main/*.command` (an den Ordnerort anpassen).
 
 ## Benutzen
 - **Programm öffnen:** im Ordner auf `start.command` doppelklicken. Der erste Start dauert ein paar Minuten (Pakete werden installiert).
   Falls der Mac sagt „nicht verifizierter Entwickler“: Rechtsklick → Öffnen → Öffnen.
 - **Videos und Musik** in den Ordner `media/` legen (oder ins Programmfenster ziehen).
-- **Mit Claude schneiden:** Terminal öffnen, `cd ~/Documents/clipcut-main` und `claude` eintippen. Dann einfach auf Deutsch sagen, was du willst, z. B.:
+- **Mit Claude schneiden:** im Ordner auf `Mit Claude schneiden.command` doppelklicken (startet Claude Code direkt im richtigen Ordner;
+  einmalig wie oben `chmod +x` bzw. Rechtsklick → Öffnen). Dann einfach auf Deutsch sagen, was du willst - die Videos dürfen
+  irgendwo liegen (z. B. in Downloads), Claude sucht sie und kopiert sie ins Programm. Beispiel:
   > Mach aus den Videos in media ein 60-Sekunden-Video für den Europatag, Querformat, ruhige Übergänge, Musik `musik.mp3`,
   > am Anfang der Titel „Unsere Schule in Europa“ leicht durchsichtig hinter der Person, Film-Look „kino“.
 
